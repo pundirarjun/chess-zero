@@ -113,7 +113,9 @@ def play_game(
 
     dirichlet_alpha=0.3,
 
-    dirichlet_epsilon=0.25
+    dirichlet_epsilon=0.25,
+
+    batch_size=64
 
 ):
 
@@ -147,10 +149,9 @@ def play_game(
         claim_draw=True
     ):
 
-        # Safety limit.
-        #
-        # Use > rather than >= so max_moves
-        # means the actual maximum number of moves.
+        # ==================================================
+        # SAFETY LIMIT
+        # ==================================================
 
         if move_number > max_moves:
 
@@ -165,7 +166,9 @@ def play_game(
         # CREATE MCTS ROOT
         # ==================================================
 
-        root = Node(board)
+        root = Node(
+            board
+        )
 
 
         # ==================================================
@@ -195,21 +198,23 @@ def play_game(
 
 
         # ==================================================
-        # MCTS SIMULATIONS
+        # BATCHED MCTS SEARCH
         # ==================================================
 
-        for _ in range(
+        remaining_simulations = max(
+            0,
+            num_simulations - 1
+        )
 
-            max(
-                0,
-                num_simulations - 1
-            )
+        if remaining_simulations > 0:
 
-        ):
+            mcts.search_batched(
 
-            mcts.run_simulation(
+                root,
 
-                root
+                num_simulations=remaining_simulations,
+
+                batch_size=batch_size
             )
 
 
@@ -252,11 +257,13 @@ def play_game(
         # SELECT MOVE
         # ==================================================
 
-        move = mcts.select_action_with_temperature(
+        move = (
+            mcts.select_action_with_temperature(
 
-            root,
+                root,
 
-            temperature=current_temperature
+                temperature=current_temperature
+            )
         )
 
 
@@ -264,7 +271,9 @@ def play_game(
         # PLAY MOVE
         # ==================================================
 
-        board.push(move)
+        board.push(
+            move
+        )
 
         move_number += 1
 

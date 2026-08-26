@@ -160,372 +160,222 @@ class MCTS:
     # BATCHED SEARCH
     # ==================================================
 
-    def search_batched(
-        self,
-        root,
-        num_simulations,
-        batch_size=64
-    ):
+def search_batched(
+    self,
+    root,
+    num_simulations,
+    batch_size=64
+):
+    """
+    Batched MCTS search.
 
-        """
-        Batched MCTS search.
+    Supports both:
 
-        The normal search() implementation remains
-        untouched.
+    1. An unexpanded root
+    2. A root that has already been expanded
+       and optionally has Dirichlet noise applied
 
-        Batched search:
+    Virtual visits are used during batch selection
+    to prevent all leaves in a batch from following
+    the same path.
+    """
 
-            select multiple leaves
-                    ↓
-              reserve paths
-                    ↓
-              batch GPU inference
-                    ↓
-             expand each leaf
-                    ↓
-                backup
-                    ↓
-          remove virtual visits
-        """
+    if num_simulations <= 0:
+        return
 
-        if num_simulations <= 0:
+    if batch_size <= 0:
+        raise ValueError(
+            "batch_size must be greater than 0."
+        )
 
-            return
+    simulations_done = 0
 
-        if batch_size <= 0:
+    # ==================================================
+    # ROOT INITIALIZATION
+    # ==================================================
 
-            raise ValueError(
-                "batch_size must be greater than 0."
-            )
+    if root.is_terminal():
+        return
 
-        simulations_done = 0
+    # Only expand/evaluate the root if it has not
+    # already been expanded.
+    #
+    # This is important for self-play because
+    # self-play expands the root first, applies
+    # Dirichlet noise, and then calls this method.
 
-        # ==================================================
-        # INITIAL ROOT EXPANSION
-        # ==================================================
-
-        if root.is_terminal():
-
-            return
+    if not root.is_expanded():
 
         value = root.expand(
             self.model,
             self.action_encoder
         )
 
-        root.backup(
-            value
-        )
+        root.backup(value)
 
         simulations_done += 1
 
-        # ==================================================
-        # BATCHED SEARCH LOOP
-        # ==================================================
+    # ==================================================
+    # BATCHED SEARCH
+    # ==================================================
 
-        while (
-            simulations_done
-            < num_simulations
-        ):
+    while simulations_done < num_simulations:
 
-            current_batch_size = min(
-                batch_size,
-                num_simulations
-                - simulations_done
+        current_batch_size = min(
+            batch_size,
+            num_simulations - simulations_done
+        )
+
+        leaves = []
+        paths = []
+
+        # ----------------------------------------------
+        # Select multiple leaves
+        # ----------------------------------------------
+
+        for _ in range(current_batch_size):
+
+            leaf, path = (
+                self._select_leaf_for_batch(
+                    root
+                )
             )
 
-            leaves = []
+            if leaf is None:
+                break
 
-            paths = []
+            # ------------------------------------------
+            # Apply virtual visits to entire path
+            # ------------------------------------------
 
-            # ----------------------------------------------
-            # SELECT LEAVES
-            # ----------------------------------------------
+            for node in path:
 
-            for _ in range(
-                current_batch_size
-            ):
+                node.virtual_visit_count += 1
 
-                leaf, path = (
-                    self._select_leaf_for_batch(
-                        root
-                    )
-                )
+            leaves.append(leaf)
 
-                if leaf is None:
+            paths.append(path)
 
-                    break
+        if not leaves:
+            break
 
-                # ------------------------------------------
-                # Apply virtual visit to the entire path
-                # ------------------------------------------
+        # ----------------------------------------------
+        # Separate terminal leaves
+        # ----------------------------------------------
 
-                for node in path:
+        non_terminal_indices = []
 
-                    node.virtual_visit_count += 1
+        non_terminal_leaves = []
 
-                leaves.append(
+        for index, leaf in enumerate(leaves):
+
+            if leaf.is_terminal():
+
+                value = self.get_terminal_value(
                     leaf
                 )
 
-                paths.append(
-                    path
+                leaf.backup(value)
+
+            else:
+
+                non_terminal_indices.append(
+                    index
                 )
 
-            if not leaves:
+                non_terminal_leaves.append(
+                    leaf
+                )
 
-                break
+        # ==================================================
+        # BATCH NEURAL NETWORK EVALUATION
+        # ==================================================
 
-            # ----------------------------------------------
-            # Terminal / non-terminal separation
-            # ----------------------------------------------
+        if non_terminal_leaves:
 
-            non_terminal_indices = []
+            states = np.stack(
+                [
+                    StateEncoder.encode(
+                        leaf.board
+                    )
+                    for leaf in non_terminal_leaves
+                ]
+            ).astype(
+                np.float32
+            )
 
-            non_terminal_leaves = []
+            device = next(
+                self.model.parameters()
+            ).device
 
-            for index, leaf in enumerate(
-                leaves
+            state_tensor = (
+                torch.from_numpy(
+                    states
+                ).to(device)
+            )
+
+            self.model.eval()
+
+            with torch.no_grad():
+
+                policy_logits, values = (
+                    self.model(
+                        state_tensor
+                    )
+                )
+
+            # ==================================================
+            # EXPAND + BACKUP
+            # ==================================================
+
+            for batch_index, original_index in enumerate(
+                non_terminal_indices
             ):
 
-                if leaf.is_terminal():
+                leaf = leaves[
+                    original_index
+                ]
 
-                    value = (
-                        self.get_terminal_value(
-                            leaf
-                        )
-                    )
-
-                    leaf.backup(
-                        value
-                    )
-
-                else:
-
-                    non_terminal_indices.append(
-                        index
-                    )
-
-                    non_terminal_leaves.append(
-                        leaf
-                    )
-
-            # ==================================================
-            # BATCH NEURAL NETWORK EVALUATION
-            # ==================================================
-
-            if non_terminal_leaves:
-
-                states = np.stack(
-                    [
-                        StateEncoder.encode(
-                            leaf.board
-                        )
-                        for leaf in
-                        non_terminal_leaves
-                    ]
-                ).astype(
-                    np.float32
-                )
-
-                device = next(
-                    self.model.parameters()
-                ).device
-
-                state_tensor = (
-                    torch.from_numpy(
-                        states
-                    ).to(device)
-                )
-
-                self.model.eval()
-
-                with torch.no_grad():
-
-                    policy_logits, values = (
-                        self.model(
-                            state_tensor
-                        )
-                    )
-
-                # ==================================================
-                # EXPANSION + BACKUP
-                # ==================================================
-
-                for batch_index, original_index in enumerate(
-                    non_terminal_indices
-                ):
-
-                    leaf = leaves[
-                        original_index
-                    ]
-
-                    # ------------------------------------------
-                    # Convert network logits into legal priors
-                    # ------------------------------------------
-
-                    policy = (
-                        policy_from_logits(
-                            leaf.board,
-                            policy_logits[
-                                batch_index
-                            ],
-                            self.action_encoder
-                        )
-                    )
-
-                    # ------------------------------------------
-                    # Expand tree
-                    # ------------------------------------------
-
-                    leaf.expand_with_policy(
-                        policy,
-                        self.action_encoder
-                    )
-
-                    # ------------------------------------------
-                    # Network value
-                    # ------------------------------------------
-
-                    value = values[
+                policy = policy_from_logits(
+                    leaf.board,
+                    policy_logits[
                         batch_index
-                    ].item()
+                    ],
+                    self.action_encoder
+                )
 
-                    # ------------------------------------------
-                    # Real backup
-                    # ------------------------------------------
+                leaf.expand_with_policy(
+                    policy,
+                    self.action_encoder
+                )
 
-                    leaf.backup(
-                        value
+                value = values[
+                    batch_index
+                ].item()
+
+                leaf.backup(
+                    value
+                )
+
+        # ==================================================
+        # REMOVE VIRTUAL VISITS
+        # ==================================================
+
+        for path in paths:
+
+            for node in path:
+
+                if node.virtual_visit_count <= 0:
+
+                    raise RuntimeError(
+                        "Invalid virtual visit count."
                     )
 
-            # ==================================================
-            # REMOVE VIRTUAL VISITS
-            # ==================================================
+                node.virtual_visit_count -= 1
 
-            for path in paths:
-
-                for node in path:
-
-                    if (
-                        node.virtual_visit_count
-                        <= 0
-                    ):
-
-                        raise RuntimeError(
-                            "Invalid virtual visit count."
-                        )
-
-                    node.virtual_visit_count -= 1
-
-            simulations_done += len(
-                leaves
-            )
-
-    # ==================================================
-    # SELECT BEST ACTION
-    # ==================================================
-
-    def select_action(
-        self,
-        root
-    ):
-
-        if not root.children:
-
-            raise ValueError(
-                "Root has not been searched."
-            )
-
-        best_move = None
-
-        best_child = None
-
-        best_visits = -1
-
-        for move, child in (
-            root.children.items()
-        ):
-
-            if (
-                child.visit_count
-                > best_visits
-            ):
-
-                best_visits = (
-                    child.visit_count
-                )
-
-                best_move = move
-
-                best_child = child
-
-        return (
-            best_move,
-            best_child
+        simulations_done += len(
+            leaves
         )
-
-    # ==================================================
-    # SELECT MOVE
-    # ==================================================
-
-    def select_move(
-        self,
-        board,
-        num_simulations=50
-    ):
-
-        root = Node(
-            board
-        )
-
-        self.search(
-            root,
-            num_simulations
-        )
-
-        # ----------------------------------------------
-        # Sort moves by visit count
-        # ----------------------------------------------
-
-        sorted_children = sorted(
-            root.children.items(),
-            key=lambda item:
-                item[1].visit_count,
-            reverse=True
-        )
-
-        print(
-            "\nTop MCTS moves:"
-        )
-
-        for move, child in (
-            sorted_children[:5]
-        ):
-
-            print(
-                move,
-                "| visits:",
-                child.visit_count,
-                "| value:",
-                round(
-                    child.value,
-                    4
-                ),
-                "| prior:",
-                round(
-                    child.prior,
-                    4
-                )
-            )
-
-        move, _ = (
-            self.select_action(
-                root
-            )
-        )
-
-        return move
 
     # ==================================================
     # MCTS POLICY TARGET
