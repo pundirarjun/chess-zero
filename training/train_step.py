@@ -46,9 +46,11 @@ def train_from_replay_buffer(
             policies.append(policy)
             values.append(value)
 
-        states = torch.stack(states)
-        policies = torch.stack(policies)
-        values = torch.stack(values)
+        device = next(model.parameters()).device
+
+        states = torch.stack(states).to(device)
+        policies = torch.stack(policies).to(device)
+        values = torch.stack(values).to(device)
 
         model.train()
 
