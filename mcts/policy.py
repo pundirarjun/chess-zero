@@ -167,3 +167,46 @@ def get_policy_and_value_for_board(
     }
 
     return policy, value.item()
+
+def policy_from_logits(
+    board,
+    policy_logits,
+    action_encoder
+):
+
+    if board.is_game_over(claim_draw=True):
+        return {}
+
+    legal_moves = list(
+        board.legal_moves
+    )
+
+    if not legal_moves:
+        return {}
+
+    legal_action_ids = [
+        action_encoder.encode(move)
+        for move in legal_moves
+    ]
+
+    legal_logits = policy_logits[
+        legal_action_ids
+    ]
+
+    legal_priors = torch.softmax(
+        legal_logits,
+        dim=0
+    )
+
+    legal_priors = (
+        legal_priors /
+        legal_priors.sum()
+    )
+
+    return {
+        move: prior.item()
+        for move, prior in zip(
+            legal_moves,
+            legal_priors
+        )
+    }

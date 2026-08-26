@@ -115,3 +115,28 @@ class Node:
             value = -value
 
             node = node.parent
+
+
+    def expand_with_policy(
+        self,
+        policy,
+        action_encoder
+    ):
+
+        if self.is_terminal():
+            return
+
+        for move, prior in policy.items():
+
+            child_board = self.board.copy()
+
+            child_board.push(move)
+
+            child = Node(
+                board=child_board,
+                parent=self,
+                move=move,
+                prior=prior
+            )
+
+            self.children[move] = child
