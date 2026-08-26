@@ -1,6 +1,13 @@
-from mcts.node import Node
-from mcts.policy import get_value_for_board
 import numpy as np
+import torch
+
+from environment.state_encoder import StateEncoder
+
+from mcts.policy import (
+    policy_from_logits
+)
+
+from mcts.node import Node
 
 class MCTS:
 
@@ -80,6 +87,210 @@ class MCTS:
         for _ in range(num_simulations):
 
             self.run_simulation(root)
+
+    def _select_leaf_for_batch(self, root, reserved):
+        """
+        Select one leaf while avoiding nodes already reserved
+        for the current batch.
+
+        Returns:
+            (node, path)
+        """
+
+        node = root
+        path = [node]
+
+        while node.is_expanded() and not node.is_terminal():
+
+            available = [
+                child
+                for child in node.children.values()
+                if id(child) not in reserved
+            ]
+
+            if not available:
+                return None, path
+
+            best_child = None
+            best_score = float("-inf")
+
+            for child in available:
+
+                score = child.puct_score(
+                    node.visit_count,
+                    self.c_puct
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_child = child
+
+            node = best_child
+            path.append(node)
+
+        if id(node) in reserved:
+            return None, path
+
+        return node, path
+
+
+    def search_batched(
+        self,
+        root,
+        num_simulations,
+        batch_size=16
+    ):
+        """
+        Experimental batched MCTS search.
+
+        The normal search() method is left untouched.
+        """
+
+        if num_simulations <= 0:
+            return
+
+        if batch_size <= 0:
+            raise ValueError(
+                "batch_size must be greater than 0."
+            )
+
+        simulations_done = 0
+
+        # --------------------------------------------------
+        # First evaluation
+        # --------------------------------------------------
+        #
+        # The root is initially unexpanded, so it cannot
+        # produce a useful batch with other leaves.
+        #
+
+        if not root.is_terminal():
+
+            value = root.expand(
+                self.model,
+                self.action_encoder
+            )
+
+            root.backup(value)
+
+            simulations_done += 1
+
+        # --------------------------------------------------
+        # Batched search
+        # --------------------------------------------------
+
+        while simulations_done < num_simulations:
+
+            current_batch_size = min(
+                batch_size,
+                num_simulations - simulations_done
+            )
+
+            leaves = []
+            paths = []
+            reserved = set()
+
+            # ----------------------------------------------
+            # Select several leaves
+            # ----------------------------------------------
+
+            for _ in range(current_batch_size):
+
+                leaf, path = self._select_leaf_for_batch(
+                    root,
+                    reserved
+                )
+
+                if leaf is None:
+                    break
+
+                reserved.add(id(leaf))
+
+                leaves.append(leaf)
+                paths.append(path)
+
+            if not leaves:
+                break
+
+            # ----------------------------------------------
+            # Handle terminal leaves separately
+            # ----------------------------------------------
+
+            non_terminal_indices = []
+            non_terminal_leaves = []
+
+            for i, leaf in enumerate(leaves):
+
+                if leaf.is_terminal():
+
+                    value = self.get_terminal_value(
+                        leaf
+                    )
+
+                    leaf.backup(value)
+
+                else:
+
+                    non_terminal_indices.append(i)
+                    non_terminal_leaves.append(leaf)
+
+            # ----------------------------------------------
+            # Batch neural-network evaluation
+            # ----------------------------------------------
+
+            if non_terminal_leaves:
+
+                states = np.stack([
+                    StateEncoder.encode(
+                        leaf.board
+                    )
+                    for leaf in non_terminal_leaves
+                ]).astype(np.float32)
+
+                device = next(
+                    self.model.parameters()
+                ).device
+
+                state_tensor = torch.from_numpy(
+                    states
+                ).to(device)
+
+                self.model.eval()
+
+                with torch.no_grad():
+
+                    policy_logits, values = self.model(
+                        state_tensor
+                    )
+
+                # ------------------------------------------
+                # Expand + backup each evaluated leaf
+                # ------------------------------------------
+
+                for batch_index, original_index in enumerate(
+                    non_terminal_indices
+                ):
+
+                    leaf = leaves[original_index]
+
+                    policy = policy_from_logits(
+                        leaf.board,
+                        policy_logits[batch_index],
+                        self.action_encoder
+                    )
+
+                    leaf.expand_with_policy(
+                        policy,
+                        self.action_encoder
+                    )
+
+                    value = values[
+                        batch_index
+                    ].item()
+
+                    leaf.backup(value)
+
+            simulations_done += len(leaves)
 
     def select_action(self, root):
 
