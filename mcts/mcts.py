@@ -44,21 +44,12 @@ class MCTS:
             return
 
         # -------------------------
-        # Expansion
+        # Expansion + Evaluation
         # -------------------------
 
-        node.expand(
+        value = node.expand(
             self.model,
             self.action_encoder
-        )
-
-        # -------------------------
-        # Evaluation
-        # -------------------------
-
-        value = get_value_for_board(
-            node.board,
-            self.model
         )
 
         # -------------------------

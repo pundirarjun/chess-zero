@@ -1,5 +1,6 @@
 import chess
-from mcts.policy import get_policy_for_board
+# from mcts.policy import get_policy_for_board
+from mcts.policy import get_policy_and_value_for_board
 
 class Node:
 
@@ -44,9 +45,9 @@ class Node:
     def expand(self, model, action_encoder):
 
         if self.is_terminal():
-            return
+            return None
 
-        policy = get_policy_for_board(
+        policy, value = get_policy_and_value_for_board(
             self.board,
             model,
             action_encoder
@@ -66,6 +67,8 @@ class Node:
             )
 
             self.children[move] = child
+
+        return value
 
     def puct_score(self, parent_visit_count, c_puct=1.5):
 
