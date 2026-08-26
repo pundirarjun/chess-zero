@@ -32,11 +32,13 @@ def run_training_iteration(
             f"Game {game_number + 1}/{num_games}"
         )
 
-        samples = play_game(
+        game_result = play_game(
             model=model,
             num_simulations=num_simulations,
             max_moves=max_moves
         )
+
+        samples = game_result.training_data
 
         replay_buffer.add(
             samples
@@ -45,6 +47,15 @@ def run_training_iteration(
         print(
             "Samples:",
             len(samples)
+        )
+
+        print(
+            "Game result:",
+            game_result.result,
+            "| Termination:",
+            game_result.termination,
+            "| Moves:",
+            game_result.moves_played
         )
 
     print(
