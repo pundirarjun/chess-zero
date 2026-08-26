@@ -271,6 +271,10 @@ def play_game(
         # PLAY MOVE
         # ==================================================
 
+        print(
+            f"{move_number}: {move}"
+        )
+
         board.push(
             move
         )
@@ -414,4 +418,4 @@ def play_game(
         moves_played=moves_played,
 
         completed=True
-    )
+    )   
