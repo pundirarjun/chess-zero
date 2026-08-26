@@ -24,9 +24,11 @@ def get_policy_for_board(
     )
 
 
+    device = next(model.parameters()).device
+
     state_tensor = torch.from_numpy(
         state
-    ).unsqueeze(0)
+    ).unsqueeze(0).to(device)
 
 
     with torch.no_grad():
@@ -96,7 +98,9 @@ def get_value_for_board(
 
     state = StateEncoder.encode(board)
 
-    state_tensor = torch.from_numpy(state).unsqueeze(0)
+    device = next(model.parameters()).device
+
+    state_tensor = torch.from_numpy(state).unsqueeze(0).to(device)
 
     with torch.no_grad():
         _, value = model(state_tensor)
