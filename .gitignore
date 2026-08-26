@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+checkpoints/
+*.pt
+*.pth
+
+.ipynb_checkpoints/
+
+.env
+
+data/pgn/lichess_2013_01.pgn
