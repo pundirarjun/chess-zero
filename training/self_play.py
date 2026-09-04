@@ -325,9 +325,9 @@ def play_game(
         # PLAY MOVE
         # ==================================================
 
-        print(
-            f"{move_number}: {move}"
-        )
+        # print(
+        #     f"{move_number}: {move}"
+        # )
 
         board.push(
             move
