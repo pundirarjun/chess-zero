@@ -13,7 +13,7 @@ def train_one_batch(
 
     model.train()
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
 
     predicted_policy, predicted_value = model(
         states

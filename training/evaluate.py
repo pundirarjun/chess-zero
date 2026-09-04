@@ -19,18 +19,10 @@ def select_move(
         action_encoder=action_encoder
     )
 
-    root.expand(
-        model,
-        action_encoder
+    mcts.search(
+        root,
+        num_simulations=num_simulations
     )
-
-    for _ in range(
-        max(0, num_simulations - 1)
-    ):
-
-        mcts.run_simulation(
-            root
-        )
 
     return mcts.select_action_with_temperature(
         root,
@@ -53,12 +45,14 @@ def play_match(
 
     move_history = []
 
-    while not board.is_game_over():
+    while not board.is_game_over(
+        claim_draw=True
+    ):
 
         if move_number >= max_moves:
 
             return {
-                "result": 0,
+                "result": None,
                 "termination": "max_moves",
                 "moves": move_history
             }
@@ -87,13 +81,13 @@ def play_match(
         move_number += 1
 
     outcome = board.outcome(
-    claim_draw=True
+        claim_draw=True
     )
 
     if outcome is None:
 
         return {
-            "result": 0,
+            "result": None,
             "termination": "unknown",
             "moves": move_history
         }
@@ -130,6 +124,7 @@ def evaluate_models(
     new_wins = 0
     old_wins = 0
     draws = 0
+    incomplete = 0
 
     terminations = {}
 
@@ -157,9 +152,13 @@ def evaluate_models(
 
                 old_wins += 1
 
-            else:
+            elif result["result"] == 0:
 
                 draws += 1
+
+            else:
+
+                incomplete += 1
 
         else:
 
@@ -178,9 +177,13 @@ def evaluate_models(
 
                 new_wins += 1
 
-            else:
+            elif result["result"] == 0:
 
                 draws += 1
+
+            else:
+
+                incomplete += 1
 
         termination = result["termination"]
 
@@ -207,5 +210,6 @@ def evaluate_models(
         "new_wins": new_wins,
         "old_wins": old_wins,
         "draws": draws,
+        "incomplete": incomplete,
         "terminations": terminations
     }

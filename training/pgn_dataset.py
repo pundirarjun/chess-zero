@@ -1,6 +1,5 @@
 import chess
 import chess.pgn
-
 import numpy as np
 
 from environment.state_encoder import StateEncoder
@@ -15,6 +14,9 @@ class PGNDatasetBuilder:
 
         self.samples = []
 
+    # ======================================================
+    # PROCESS ONE GAME
+    # ======================================================
 
     def process_game(
         self,
@@ -23,14 +25,14 @@ class PGNDatasetBuilder:
 
         board = game.board()
 
-
+        # --------------------------------------------------
         # Determine game result
+        # --------------------------------------------------
 
         result = game.headers.get(
             "Result",
             "*"
         )
-
 
         if result == "1-0":
 
@@ -46,41 +48,61 @@ class PGNDatasetBuilder:
 
         else:
 
+            # Unknown / unfinished game.
             return
 
+        # ==================================================
+        # PROCESS MOVES
+        # ==================================================
 
         for move in game.mainline_moves():
 
-            # ------------------------------------------
+            # --------------------------------------------------
             # Store position BEFORE the move
-            # ------------------------------------------
+            # --------------------------------------------------
 
             state = StateEncoder.encode(
                 board
             )
 
+            # --------------------------------------------------
+            # Validate move
+            # --------------------------------------------------
 
             if move not in board.legal_moves:
+
                 return
+
+            # --------------------------------------------------
+            # Convert move to action ID
+            # --------------------------------------------------
 
             try:
-                action_id = self.action_encoder.encode(move)
+
+                action_id = (
+                    self.action_encoder.encode(
+                        move
+                    )
+                )
+
             except KeyError:
+
                 return
 
+            # --------------------------------------------------
+            # Create one-hot policy target
+            # --------------------------------------------------
 
             policy = np.zeros(
                 self.action_encoder.size(),
                 dtype=np.float32
             )
 
-
             policy[action_id] = 1.0
 
-
-            # ------------------------------------------
+            # --------------------------------------------------
             # Value from current player's perspective
-            # ------------------------------------------
+            # --------------------------------------------------
 
             if winner is None:
 
@@ -94,9 +116,11 @@ class PGNDatasetBuilder:
 
                 value = -1.0
 
+            # --------------------------------------------------
+            # Store sample
+            # --------------------------------------------------
 
             self.samples.append(
-
                 (
                     state,
                     policy,
@@ -104,13 +128,17 @@ class PGNDatasetBuilder:
                 )
             )
 
-
-            # ------------------------------------------
+            # --------------------------------------------------
             # Play move
-            # ------------------------------------------
+            # --------------------------------------------------
 
-            board.push(move)
+            board.push(
+                move
+            )
 
+    # ======================================================
+    # BUILD DATASET FROM PGN
+    # ======================================================
 
     def build_from_pgn(
         self,
@@ -129,72 +157,47 @@ class PGNDatasetBuilder:
 
             while True:
 
-                # ------------------------------------------
+                # --------------------------------------------------
                 # Game limit
-                # ------------------------------------------
+                # --------------------------------------------------
 
                 if (
                     max_games is not None
                     and games_processed >= max_games
                 ):
+
                     break
 
-
-                # ------------------------------------------
+                # --------------------------------------------------
                 # Read next game
-                # ------------------------------------------
+                # --------------------------------------------------
 
                 game = chess.pgn.read_game(
                     file
                 )
 
-
                 if game is None:
+
                     break
 
-
-                # ------------------------------------------
+                # --------------------------------------------------
                 # Process game
-                # ------------------------------------------
+                # --------------------------------------------------
 
                 self.process_game(
                     game
                 )
 
-
                 games_processed += 1
-
 
         print(
             "Games processed:",
             games_processed
         )
 
-
-        return self.samples
-
-        with open(
-            pgn_path,
-            "r",
-            encoding="utf-8",
-            errors="ignore"
-        ) as file:
-
-            while True:
-
-                game = chess.pgn.read_game(
-                    file
-                )
-
-
-                if game is None:
-
-                    break
-
-
-                self.process_game(
-                    game
-                )
-
+        print(
+            "Samples generated:",
+            len(self.samples)
+        )
 
         return self.samples

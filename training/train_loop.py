@@ -1,5 +1,3 @@
-import torch
-
 from training.iteration import run_training_iteration
 
 
@@ -12,8 +10,13 @@ def run_training_loop(
     num_games=3,
     num_simulations=10,
     max_moves=30,
-    batch_size=8,
-    training_steps=10
+    mcts_batch_size=64,
+    training_batch_size=8,
+    training_steps=10,
+    temperature=1.0,
+    temperature_moves=20,
+    dirichlet_alpha=0.3,
+    dirichlet_epsilon=0.25
 ):
 
     history = []
@@ -31,34 +34,53 @@ def run_training_loop(
             num_games=num_games,
             num_simulations=num_simulations,
             max_moves=max_moves,
-            batch_size=batch_size,
-            training_steps=training_steps
+            mcts_batch_size=mcts_batch_size,
+            training_batch_size=training_batch_size,
+            training_steps=training_steps,
+            temperature=temperature,
+            temperature_moves=temperature_moves,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon
         )
 
-        average_total_loss = sum(
-            losses["total_loss"]
-        ) / len(
-            losses["total_loss"]
+        # No training occurred
+        if losses is None:
+            history.append(
+                {
+                    "iteration": iteration,
+                    "replay_buffer_size": len(replay_buffer),
+                    "average_total_loss": None,
+                    "average_policy_loss": None,
+                    "average_value_loss": None
+                }
+            )
+
+            print(
+                "\nIteration skipped: "
+                "no training data available."
+            )
+
+            continue
+
+        average_total_loss = (
+            sum(losses["total_loss"])
+            / len(losses["total_loss"])
         )
 
-        average_policy_loss = sum(
-            losses["policy_loss"]
-        ) / len(
-            losses["policy_loss"]
+        average_policy_loss = (
+            sum(losses["policy_loss"])
+            / len(losses["policy_loss"])
         )
 
-        average_value_loss = sum(
-            losses["value_loss"]
-        ) / len(
-            losses["value_loss"]
+        average_value_loss = (
+            sum(losses["value_loss"])
+            / len(losses["value_loss"])
         )
 
         history.append(
             {
                 "iteration": iteration,
-                "replay_buffer_size": len(
-                    replay_buffer
-                ),
+                "replay_buffer_size": len(replay_buffer),
                 "average_total_loss":
                     average_total_loss,
                 "average_policy_loss":

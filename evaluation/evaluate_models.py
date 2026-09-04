@@ -1,117 +1,244 @@
 import sys
 import os
-
-# ==================================================
-# Make project root importable
-# ==================================================
-
-sys.path.append(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    )
-)
-
 import random
+
 import numpy as np
 import torch
 import chess
 
+# ==========================================================
+# MAKE PROJECT ROOT IMPORTABLE
+# ==========================================================
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+if PROJECT_ROOT not in sys.path:
+
+    sys.path.append(
+        PROJECT_ROOT
+    )
+
+
+# ==========================================================
+# IMPORTS
+# ==========================================================
+
 from model.chess_net import ChessNet
+
 from environment.action_encoder import ActionEncoder
+
 from mcts.node import Node
+
 from mcts.mcts import MCTS
 
 
-# ==================================================
+# ==========================================================
 # CONFIGURATION
-# ==================================================
+# ==========================================================
+
+# ----------------------------------------------------------
+# Number of evaluation games per matchup
+# ----------------------------------------------------------
 
 NUM_GAMES = 10
 
-NUM_SIMULATIONS = 25
+
+# ----------------------------------------------------------
+# MCTS simulations per move
+# ----------------------------------------------------------
+
+NUM_SIMULATIONS = 100
+
+
+# ----------------------------------------------------------
+# MCTS batch size
+#
+# Evaluation uses normal MCTS here, so this is not currently
+# used by get_move(). It is kept available if we later switch
+# evaluation to batched MCTS.
+# ----------------------------------------------------------
+
+MCTS_BATCH_SIZE = 64
+
+
+# ----------------------------------------------------------
+# Maximum number of plies per game
+# ----------------------------------------------------------
 
 MAX_MOVES = 300
 
-# Temperature used ONLY during evaluation.
+
+# ----------------------------------------------------------
+# Evaluation temperature
 #
-# Lower = more deterministic / stronger preference
-# for the highest visit-count move.
+# 0.0 = deterministic highest-visit-count move.
 #
-# Higher = more exploration.
-EVALUATION_TEMPERATURE = 0.25
+# IMPORTANT:
+# Evaluation should normally be deterministic.
+# ----------------------------------------------------------
+
+EVALUATION_TEMPERATURE = 0.0
 
 
-# ==================================================
-# SETUP
-# ==================================================
+# ==========================================================
+# DEVICE
+# ==========================================================
+
+DEVICE = torch.device(
+
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
+
+)
+
+
+# ==========================================================
+# ACTION ENCODER
+# ==========================================================
 
 action_encoder = ActionEncoder()
 
 
-# ==================================================
-# RANDOM MODEL
-# ==================================================
+print(
+    "Evaluation device:",
+    DEVICE
+)
 
-random_model = ChessNet(
-    action_space_size=action_encoder.size()
+print(
+    "Action space size:",
+    action_encoder.size()
 )
 
 
-# ==================================================
-# PRETRAINED MODEL
-# ==================================================
+# ==========================================================
+# CREATE MODEL
+# ==========================================================
 
-pretrained_model = ChessNet(
-    action_space_size=action_encoder.size()
+def create_model():
+
+    model = ChessNet(
+        action_space_size=action_encoder.size()
+    )
+
+    model.to(
+        DEVICE
+    )
+
+    model.eval()
+
+    return model
+
+
+# ==========================================================
+# LOAD MODEL CHECKPOINT
+# ==========================================================
+
+def load_model(
+    model,
+    checkpoint_path
+):
+
+    if not os.path.exists(
+        checkpoint_path
+    ):
+
+        raise FileNotFoundError(
+            f"Checkpoint not found: "
+            f"{checkpoint_path}"
+        )
+
+    checkpoint = torch.load(
+
+        checkpoint_path,
+
+        map_location=DEVICE,
+
+        weights_only=False
+
+    )
+
+    model.load_state_dict(
+        checkpoint[
+            "model_state_dict"
+        ]
+    )
+
+    model.to(
+        DEVICE
+    )
+
+    model.eval()
+
+    return checkpoint
+
+
+# ==========================================================
+# CREATE MODELS
+# ==========================================================
+
+random_model = create_model()
+
+pretrained_model = create_model()
+
+rl_model = create_model()
+
+
+# ==========================================================
+# LOAD PRETRAINED MODEL
+# ==========================================================
+
+pretrained_checkpoint = load_model(
+
+    pretrained_model,
+
+    "checkpoints/pretrained_1000_games.pt"
+
 )
 
-
-# ==================================================
-# RL MODEL
-# ==================================================
-
-rl_model = ChessNet(
-    action_space_size=action_encoder.size()
+print(
+    "\nLoaded pretrained model."
 )
 
+if "iteration" in pretrained_checkpoint:
 
-# ==================================================
-# LOAD PRETRAINED CHECKPOINT
-# ==================================================
+    print(
+        "Pretrained checkpoint iteration:",
+        pretrained_checkpoint["iteration"]
+    )
 
-pretrained_checkpoint = torch.load(
-    "checkpoints/pretrained_1000_games.pt",
-    map_location="cpu"
+
+# ==========================================================
+# LOAD RL MODEL
+# ==========================================================
+
+rl_checkpoint = load_model(
+
+    rl_model,
+
+    "checkpoints/rl_iteration_4.pt"
+
 )
 
-pretrained_model.load_state_dict(
-    pretrained_checkpoint[
-        "model_state_dict"
-    ]
+print(
+    "Loaded RL model."
 )
 
+if "iteration" in rl_checkpoint:
 
-# ==================================================
-# LOAD RL ITERATION 4 CHECKPOINT
-# ==================================================
-
-rl_checkpoint = torch.load(
-    "checkpoints/rl_iteration_4.pt",
-    map_location="cpu"
-)
-
-rl_model.load_state_dict(
-    rl_checkpoint[
-        "model_state_dict"
-    ]
-)
+    print(
+        "RL checkpoint iteration:",
+        rl_checkpoint["iteration"]
+    )
 
 
-# ==================================================
-# EVAL MODE
-# ==================================================
+# ==========================================================
+# ENSURE EVAL MODE
+# ==========================================================
 
 random_model.eval()
 
@@ -120,172 +247,124 @@ pretrained_model.eval()
 rl_model.eval()
 
 
-# ==================================================
-# MCTS MOVE
-# ==================================================
+# ==========================================================
+# GET MOVE USING MCTS
+# ==========================================================
 
-def get_move(model, board):
+def get_move(
+    model,
+    board
+):
+
+    # ------------------------------------------------------
+    # Create MCTS object
+    # ------------------------------------------------------
 
     mcts = MCTS(
+
         model=model,
+
         action_encoder=action_encoder
+
     )
 
-    root = Node(board)
+    # ------------------------------------------------------
+    # Create root
+    # ------------------------------------------------------
 
-    # --------------------------------------------------
-    # Expand root
-    # --------------------------------------------------
-
-    root.expand(
-        model,
-        action_encoder
+    root = Node(
+        board
     )
 
-    # --------------------------------------------------
-    # Run MCTS simulations
-    # --------------------------------------------------
+    # ------------------------------------------------------
+    # Run exactly NUM_SIMULATIONS simulations
+    #
+    # IMPORTANT:
+    #
+    # Do NOT manually subtract 1.
+    #
+    # MCTS.search() already handles root initialization.
+    # ------------------------------------------------------
 
-    for _ in range(
-        NUM_SIMULATIONS - 1
-    ):
+    mcts.search(
 
-        mcts.run_simulation(
-            root
-        )
+        root,
 
-    # --------------------------------------------------
-    # Get visit counts
-    # --------------------------------------------------
+        num_simulations=NUM_SIMULATIONS
 
-    children = root.children
+    )
 
-    if not children:
+    # ------------------------------------------------------
+    # Safety check
+    # ------------------------------------------------------
+
+    if not root.children:
 
         raise RuntimeError(
             "MCTS root has no children."
         )
 
-    moves = []
+    # ------------------------------------------------------
+    # Deterministic evaluation
+    # ------------------------------------------------------
 
-    visit_counts = []
+    if EVALUATION_TEMPERATURE <= 0:
 
-    for move, child in children.items():
-
-        moves.append(move)
-
-        visit_counts.append(
-            max(
-                0,
-                child.visit_count
+        move, child = (
+            mcts.select_action(
+                root
             )
         )
 
-    visit_counts = np.asarray(
-        visit_counts,
-        dtype=np.float64
+        if move is None:
+
+            raise RuntimeError(
+                "MCTS failed to select a move."
+            )
+
+        return move
+
+    # ------------------------------------------------------
+    # Optional stochastic evaluation
+    #
+    # Normally not used.
+    # ------------------------------------------------------
+
+    return (
+        mcts.select_action_with_temperature(
+
+            root,
+
+            temperature=EVALUATION_TEMPERATURE
+
+        )
     )
 
-    # --------------------------------------------------
-    # Safety check
-    # --------------------------------------------------
 
-    total_visits = visit_counts.sum()
-
-    if total_visits <= 0:
-
-        # This should almost never happen.
-        # Fall back to a random legal move.
-
-        legal_moves = list(
-            board.legal_moves
-        )
-
-        return random.choice(
-            legal_moves
-        )
-
-    # ==================================================
-    # TEMPERATURE SAMPLING
-    # ==================================================
-
-    temperature = (
-        EVALUATION_TEMPERATURE
-    )
-
-    if temperature <= 0:
-
-        # Pure greedy selection
-
-        selected_index = int(
-            np.argmax(
-                visit_counts
-            )
-        )
-
-    else:
-
-        # AlphaZero-style temperature transformation:
-        #
-        # probability ∝ visit_count^(1 / temperature)
-
-        probabilities = (
-            visit_counts
-            ** (
-                1.0 / temperature
-            )
-        )
-
-        probability_sum = (
-            probabilities.sum()
-        )
-
-        if probability_sum <= 0:
-
-            probabilities = (
-                np.ones_like(
-                    visit_counts
-                )
-                / len(visit_counts)
-            )
-
-        else:
-
-            probabilities = (
-                probabilities
-                / probability_sum
-            )
-
-        # --------------------------------------------------
-        # Explicit stochastic sampling
-        # --------------------------------------------------
-
-        selected_index = np.random.choice(
-            len(moves),
-            p=probabilities
-        )
-
-    return moves[
-        selected_index
-    ]
-
-
-# ==================================================
+# ==========================================================
 # MOVE RANDOMNESS TEST
-# ==================================================
+# ==========================================================
 
-def test_move_randomness(model):
+def test_move_determinism(
+    model,
+    model_name
+):
 
     print(
         "\n=============================="
     )
 
     print(
-        "MOVE RANDOMNESS TEST"
+        "MOVE DETERMINISM TEST"
     )
 
     print(
         "=============================="
+    )
+
+    print(
+        "Model:",
+        model_name
     )
 
     board = chess.Board()
@@ -295,13 +374,14 @@ def test_move_randomness(model):
     for i in range(10):
 
         move = get_move(
+
             model,
+
             board
+
         )
 
-        move_name = (
-            move.uci()
-        )
+        move_name = move.uci()
 
         move_counts[
             move_name
@@ -321,23 +401,50 @@ def test_move_randomness(model):
     )
 
     for move, count in sorted(
+
         move_counts.items(),
+
         key=lambda x: x[1],
+
         reverse=True
+
     ):
 
         print(
             f"{move}: {count}"
         )
 
+    # ------------------------------------------------------
+    # Determinism check
+    # ------------------------------------------------------
 
-# ==================================================
-# PLAY GAME
-# ==================================================
+    if len(move_counts) == 1:
+
+        print(
+            "\nDeterminism test: PASS"
+        )
+
+    else:
+
+        print(
+            "\nDeterminism test: WARNING"
+        )
+
+        print(
+            "Different moves were selected."
+        )
+
+
+# ==========================================================
+# PLAY ONE GAME
+# ==========================================================
 
 def play_game(
+
     white_model,
+
     black_model
+
 ):
 
     board = chess.Board()
@@ -348,21 +455,27 @@ def play_game(
         claim_draw=True
     ):
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Safety limit
-        # ------------------------------------------
+        # --------------------------------------------------
 
         if moves >= MAX_MOVES:
 
             return {
+
                 "result": None,
-                "termination": "MAX_MOVES",
-                "moves": moves
+
+                "termination":
+                    "MAX_MOVES",
+
+                "moves":
+                    moves
+
             }
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Select model
-        # ------------------------------------------
+        # --------------------------------------------------
 
         if board.turn == chess.WHITE:
 
@@ -372,36 +485,44 @@ def play_game(
 
             model = black_model
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Get MCTS move
-        # ------------------------------------------
+        # --------------------------------------------------
 
         move = get_move(
+
             model,
+
             board
+
         )
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Safety check
-        # ------------------------------------------
+        # --------------------------------------------------
 
         if move not in board.legal_moves:
 
             raise RuntimeError(
-                f"Illegal move returned by MCTS: {move}"
+
+                f"Illegal move returned by MCTS: "
+                f"{move}"
+
             )
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Play move
-        # ------------------------------------------
+        # --------------------------------------------------
 
-        board.push(move)
+        board.push(
+            move
+        )
 
         moves += 1
 
-    # ==================================================
+    # ======================================================
     # GAME TERMINATED
-    # ==================================================
+    # ======================================================
 
     outcome = board.outcome(
         claim_draw=True
@@ -409,44 +530,65 @@ def play_game(
 
     if outcome is None:
 
-        result = "1/2-1/2"
+        return {
 
-        termination = "UNKNOWN"
+            "result":
+                "1/2-1/2",
+
+            "termination":
+                "UNKNOWN",
+
+            "moves":
+                moves
+
+        }
+
+    # ------------------------------------------------------
+    # Determine result
+    # ------------------------------------------------------
+
+    if outcome.winner == chess.WHITE:
+
+        result = "1-0"
+
+    elif outcome.winner == chess.BLACK:
+
+        result = "0-1"
 
     else:
 
-        if outcome.winner == chess.WHITE:
-
-            result = "1-0"
-
-        elif outcome.winner == chess.BLACK:
-
-            result = "0-1"
-
-        else:
-
-            result = "1/2-1/2"
-
-        termination = str(
-            outcome.termination
-        )
+        result = "1/2-1/2"
 
     return {
-        "result": result,
-        "termination": termination,
-        "moves": moves
+
+        "result":
+            result,
+
+        "termination":
+            str(
+                outcome.termination
+            ),
+
+        "moves":
+            moves
+
     }
 
 
-# ==================================================
+# ==========================================================
 # EVALUATE TWO MODELS
-# ==================================================
+# ==========================================================
 
 def evaluate_models(
+
     model_a,
+
     model_b,
+
     name_a,
+
     name_b
+
 ):
 
     a_wins = 0
@@ -459,30 +601,55 @@ def evaluate_models(
 
     termination_counts = {}
 
+    total_moves = 0
+
+    # ======================================================
+    # HEADER
+    # ======================================================
+
     print(
         "\n=============================="
     )
 
     print(
-        f"{name_a.upper()} VS {name_b.upper()}"
+        f"{name_a.upper()} VS "
+        f"{name_b.upper()}"
     )
 
     print(
         "=============================="
     )
 
-    # ==================================================
+    print(
+        "Games:",
+        NUM_GAMES
+    )
+
+    print(
+        "MCTS simulations:",
+        NUM_SIMULATIONS
+    )
+
+    print(
+        "Evaluation temperature:",
+        EVALUATION_TEMPERATURE
+    )
+
+    # ======================================================
     # GAMES
-    # ==================================================
+    # ======================================================
 
     for game_number in range(
+
         1,
+
         NUM_GAMES + 1
+
     ):
 
-        # ------------------------------------------
+        # --------------------------------------------------
         # Alternate colors
-        # ------------------------------------------
+        # --------------------------------------------------
 
         if game_number % 2 == 1:
 
@@ -505,17 +672,19 @@ def evaluate_models(
         )
 
         print(
-            f"{name_a}:",
-            a_color
+            f"{name_a}: {a_color}"
         )
 
-        # ------------------------------------------
-        # Play
-        # ------------------------------------------
+        # --------------------------------------------------
+        # Play game
+        # --------------------------------------------------
 
         result = play_game(
+
             white_model,
+
             black_model
+
         )
 
         print(
@@ -532,6 +701,8 @@ def evaluate_models(
             "Moves:",
             result["moves"]
         )
+
+        total_moves += result["moves"]
 
         # ==================================================
         # SCORE RESULT
@@ -550,15 +721,25 @@ def evaluate_models(
             true_draws += 1
 
         elif (
+
             result["result"] == "1-0"
-            and a_color == "White"
+
+            and
+
+            a_color == "White"
+
         ):
 
             a_wins += 1
 
         elif (
+
             result["result"] == "0-1"
-            and a_color == "Black"
+
+            and
+
+            a_color == "Black"
+
         ):
 
             a_wins += 1
@@ -584,9 +765,9 @@ def evaluate_models(
             ) + 1
         )
 
-    # ==================================================
+    # ======================================================
     # RESULTS
-    # ==================================================
+    # ======================================================
 
     print(
         "\n=============================="
@@ -620,26 +801,45 @@ def evaluate_models(
         truncated
     )
 
-    # ==================================================
-    # SCORE
-    # ==================================================
+    print(
+        "Total moves:",
+        total_moves
+    )
+
+    # ======================================================
+    # COMPLETED GAMES
+    # ======================================================
 
     completed_games = (
+
         a_wins
+
         + b_wins
+
         + true_draws
+
     )
+
+    # ======================================================
+    # SCORE
+    # ======================================================
 
     if completed_games > 0:
 
         a_score = (
+
             a_wins
+
             + 0.5 * true_draws
+
         ) / completed_games
 
         b_score = (
+
             b_wins
+
             + 0.5 * true_draws
+
         ) / completed_games
 
     else:
@@ -649,20 +849,47 @@ def evaluate_models(
         b_score = 0.0
 
     print(
-        "\nScore among completed games:"
+        "\nCompleted games:",
+        completed_games
     )
 
     print(
-        f"{name_a}: {a_score:.3f}"
+        "Score among completed games:"
     )
 
     print(
-        f"{name_b}: {b_score:.3f}"
+        f"{name_a}: "
+        f"{a_score:.3f}"
     )
 
-    # ==================================================
-    # TERMINATIONS
-    # ==================================================
+    print(
+        f"{name_b}: "
+        f"{b_score:.3f}"
+    )
+
+    # ======================================================
+    # TRUNCATION RATE
+    # ======================================================
+
+    if NUM_GAMES > 0:
+
+        truncation_rate = (
+            truncated
+            / NUM_GAMES
+        )
+
+    else:
+
+        truncation_rate = 0.0
+
+    print(
+        "\nTruncation rate:",
+        f"{truncation_rate:.2%}"
+    )
+
+    # ======================================================
+    # TERMINATION REASONS
+    # ======================================================
 
     print(
         "\nTermination reasons:"
@@ -678,50 +905,113 @@ def evaluate_models(
             count
         )
 
+    # ======================================================
+    # AVERAGE GAME LENGTH
+    # ======================================================
 
-# ==================================================
+    if NUM_GAMES > 0:
+
+        average_moves = (
+            total_moves
+            / NUM_GAMES
+        )
+
+        print(
+            "\nAverage game length:",
+            f"{average_moves:.1f} moves"
+        )
+
+    return {
+
+        "a_wins":
+            a_wins,
+
+        "b_wins":
+            b_wins,
+
+        "draws":
+            true_draws,
+
+        "truncated":
+            truncated,
+
+        "completed_games":
+            completed_games,
+
+        "a_score":
+            a_score,
+
+        "b_score":
+            b_score,
+
+        "termination_counts":
+            termination_counts
+
+    }
+
+
+# ==========================================================
 # MAIN
-# ==================================================
+# ==========================================================
 
 if __name__ == "__main__":
 
-    # ==================================================
-    # 1. TEST RANDOMNESS
-    # ==================================================
+    # ======================================================
+    # 1. TEST RL MODEL DETERMINISM
+    # ======================================================
 
-    test_move_randomness(
-        rl_model
+    test_move_determinism(
+
+        rl_model,
+
+        "RL Iteration 4"
+
     )
 
-    # ==================================================
+    # ======================================================
     # 2. PRETRAINED VS RANDOM
-    # ==================================================
+    # ======================================================
 
     evaluate_models(
+
         pretrained_model,
+
         random_model,
+
         "Pretrained",
+
         "Random"
+
     )
 
-    # ==================================================
-    # 3. RL ITERATION 4 VS RANDOM
-    # ==================================================
+    # ======================================================
+    # 3. RL VS RANDOM
+    # ======================================================
 
     evaluate_models(
+
         rl_model,
+
         random_model,
+
         "RL Iteration 4",
+
         "Random"
+
     )
 
-    # ==================================================
-    # 4. RL ITERATION 4 VS PRETRAINED
-    # ==================================================
+    # ======================================================
+    # 4. RL VS PRETRAINED
+    # ======================================================
 
     evaluate_models(
+
         rl_model,
+
         pretrained_model,
+
         "RL Iteration 4",
+
         "Pretrained"
+
     )

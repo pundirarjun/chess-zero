@@ -1,32 +1,43 @@
 import sys
 import os
 
-# ==================================================
-# Make project root importable
-# ==================================================
+# ==========================================================
+# MAKE PROJECT ROOT IMPORTABLE
+# ==========================================================
 
-sys.path.append(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    )
+PROJECT_ROOT = os.path.dirname(
+    os.path.abspath(__file__)
 )
+
+if PROJECT_ROOT not in sys.path:
+
+    sys.path.append(
+        PROJECT_ROOT
+    )
+
+
+# ==========================================================
+# IMPORTS
+# ==========================================================
 
 import torch
 import chess
 
 from model.chess_net import ChessNet
+
 from environment.action_encoder import ActionEncoder
+
 from mcts.node import Node
 from mcts.mcts import MCTS
 
 
-# ==================================================
+# ==========================================================
 # CONFIGURATION
-# ==================================================
+# ==========================================================
 
-CHECKPOINT = "checkpoints/rl_iteration_4.pt"
+CHECKPOINT = (
+    "checkpoints/rl_iteration_4.pt"
+)
 
 SIMULATION_COUNTS = [
     25,
@@ -36,129 +47,249 @@ SIMULATION_COUNTS = [
 ]
 
 
-# ==================================================
-# LOAD MODEL
-# ==================================================
+# ==========================================================
+# DEVICE
+# ==========================================================
+
+DEVICE = torch.device(
+
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
+
+)
+
+print(
+    "Device:",
+    DEVICE
+)
+
+
+# ==========================================================
+# ACTION ENCODER
+# ==========================================================
 
 action_encoder = ActionEncoder()
 
-model = ChessNet(
-    action_space_size=action_encoder.size()
+print(
+    "Action space:",
+    action_encoder.size()
 )
 
+
+# ==========================================================
+# CREATE MODEL
+# ==========================================================
+
+model = ChessNet(
+
+    action_space_size=
+        action_encoder.size()
+
+)
+
+model.to(
+    DEVICE
+)
+
+
+# ==========================================================
+# LOAD CHECKPOINT
+# ==========================================================
+
 checkpoint = torch.load(
+
     CHECKPOINT,
-    map_location="cpu"
+
+    map_location=DEVICE,
+
+    weights_only=False
+
 )
 
 model.load_state_dict(
-    checkpoint["model_state_dict"]
+
+    checkpoint[
+        "model_state_dict"
+    ]
+
 )
 
 model.eval()
 
 
-# ==================================================
+print(
+    "Checkpoint loaded:",
+    CHECKPOINT
+)
+
+if "iteration" in checkpoint:
+
+    print(
+        "Checkpoint iteration:",
+        checkpoint["iteration"]
+    )
+
+
+# ==========================================================
 # TACTICAL POSITION
-# ==================================================
+# ==========================================================
 
 board = chess.Board()
 
 board.clear()
 
-# Black king
+
+# ==========================================================
+# BLACK KING
+# ==========================================================
+
 board.set_piece_at(
+
     chess.G8,
+
     chess.Piece(
         chess.KING,
         chess.BLACK
     )
+
 )
 
-# Black queen
+
+# ==========================================================
+# BLACK QUEEN
+# ==========================================================
+
 board.set_piece_at(
+
     chess.D5,
+
     chess.Piece(
         chess.QUEEN,
         chess.BLACK
     )
+
 )
 
-# Black pawns
+
+# ==========================================================
+# BLACK PAWNS
+# ==========================================================
+
 board.set_piece_at(
+
     chess.F7,
+
     chess.Piece(
         chess.PAWN,
         chess.BLACK
     )
+
 )
 
 board.set_piece_at(
+
     chess.G7,
+
     chess.Piece(
         chess.PAWN,
         chess.BLACK
     )
+
 )
 
 board.set_piece_at(
+
     chess.H7,
+
     chess.Piece(
         chess.PAWN,
         chess.BLACK
     )
+
 )
 
-# White queen
+
+# ==========================================================
+# WHITE QUEEN
+# ==========================================================
+
 board.set_piece_at(
+
     chess.E4,
+
     chess.Piece(
         chess.QUEEN,
         chess.WHITE
     )
+
 )
 
-# White king
+
+# ==========================================================
+# WHITE KING
+# ==========================================================
+
 board.set_piece_at(
+
     chess.G1,
+
     chess.Piece(
         chess.KING,
         chess.WHITE
     )
+
 )
 
-# White pawns
+
+# ==========================================================
+# WHITE PAWNS
+# ==========================================================
+
 board.set_piece_at(
+
     chess.F2,
+
     chess.Piece(
         chess.PAWN,
         chess.WHITE
     )
+
 )
 
 board.set_piece_at(
+
     chess.G2,
+
     chess.Piece(
         chess.PAWN,
         chess.WHITE
     )
+
 )
 
 board.set_piece_at(
+
     chess.H2,
+
     chess.Piece(
         chess.PAWN,
         chess.WHITE
     )
+
 )
 
-# White to move
+
+# ==========================================================
+# GAME STATE
+# ==========================================================
+
 board.turn = chess.WHITE
 
 
-# ==================================================
+# ==========================================================
 # PRINT POSITION
-# ==================================================
+# ==========================================================
 
 print(
     "\n=============================="
@@ -172,12 +303,24 @@ print(
     "=============================="
 )
 
-print(board)
+print(
+    board
+)
 
 
-# ==================================================
-# RUN MCTS
-# ==================================================
+# ==========================================================
+# BASIC POSITION CHECK
+# ==========================================================
+
+print(
+    "\nLegal moves:",
+    board.legal_moves.count()
+)
+
+
+# ==========================================================
+# RUN MCTS TESTS
+# ==========================================================
 
 for simulations in SIMULATION_COUNTS:
 
@@ -193,57 +336,115 @@ for simulations in SIMULATION_COUNTS:
         "=============================="
     )
 
+
+    # ------------------------------------------------------
+    # Create MCTS
+    # ------------------------------------------------------
+
     mcts = MCTS(
+
         model=model,
-        action_encoder=action_encoder
+
+        action_encoder=
+            action_encoder
+
     )
 
-    root = Node(board)
 
-    # Expand root
-    root.expand(
-        model,
-        action_encoder
+    # ------------------------------------------------------
+    # Create fresh root
+    # ------------------------------------------------------
+
+    root = Node(
+        board
     )
 
-    # Run remaining simulations
-    for _ in range(
-        max(
-            0,
-            simulations - 1
-        )
-    ):
 
-        mcts.run_simulation(
-            root
-        )
+    # ------------------------------------------------------
+    # Run exactly N simulations
+    # ------------------------------------------------------
 
-    # Sort by visits
+    mcts.search(
+
+        root,
+
+        num_simulations=
+            simulations
+
+    )
+
+
+    # ------------------------------------------------------
+    # Check root
+    # ------------------------------------------------------
+
+    print(
+        "Root visits:",
+        root.visit_count
+    )
+
+    print(
+        "Root children:",
+        len(root.children)
+    )
+
+
+    # ------------------------------------------------------
+    # Sort children
+    # ------------------------------------------------------
+
     sorted_children = sorted(
+
         root.children.items(),
-        key=lambda item: (
-            item[1].visit_count
-        ),
+
+        key=lambda item:
+            item[1].visit_count,
+
         reverse=True
+
     )
+
+
+    # ======================================================
+    # PRINT TOP MOVES
+    # ======================================================
 
     print(
         "\nTop moves:"
     )
 
-    for move, child in sorted_children[:10]:
+    for move, child in (
+        sorted_children[:10]
+    ):
 
         print(
+
             f"{move} | "
-            f"visits: {child.visit_count} | "
-            f"value: {child.value:.4f} | "
-            f"prior: {child.prior:.4f}"
+
+            f"visits: "
+            f"{child.visit_count} | "
+
+            f"value: "
+            f"{child.value:.4f} | "
+
+            f"prior: "
+            f"{child.prior:.4f}"
+
         )
 
-    # Best move
+
+    # ======================================================
+    # SELECT BEST MOVE
+    # ======================================================
+
     best_move, best_child = (
-        mcts.select_action(root)
+
+        mcts.select_action(
+            root
+        )
+
     )
+
 
     print(
         "\nSelected move:",
@@ -259,6 +460,14 @@ for simulations in SIMULATION_COUNTS:
         "Value:",
         round(
             best_child.value,
+            4
+        )
+    )
+
+    print(
+        "Prior:",
+        round(
+            best_child.prior,
             4
         )
     )

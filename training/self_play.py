@@ -10,6 +10,10 @@ from mcts.node import Node
 from mcts.mcts import MCTS
 
 
+# ==========================================================
+# TRAINING SAMPLE
+# ==========================================================
+
 @dataclass
 class TrainingSample:
 
@@ -17,6 +21,10 @@ class TrainingSample:
     policy: np.ndarray
     player: int
 
+
+# ==========================================================
+# SELF-PLAY RESULT
+# ==========================================================
 
 @dataclass
 class SelfPlayResult:
@@ -28,11 +36,19 @@ class SelfPlayResult:
     completed: bool
 
 
+# ==========================================================
+# SELF-PLAY GAME
+# ==========================================================
+
 class SelfPlayGame:
 
     def __init__(self):
 
         self.samples = []
+
+    # ======================================================
+    # STORE POSITION
+    # ======================================================
 
     def add_position(
         self,
@@ -40,7 +56,13 @@ class SelfPlayGame:
         policy
     ):
 
-        state = StateEncoder.encode(board)
+        # Encode board state.
+
+        state = StateEncoder.encode(
+            board
+        )
+
+        # Store which player was to move.
 
         player = (
             1
@@ -60,7 +82,13 @@ class SelfPlayGame:
             player=player
         )
 
-        self.samples.append(sample)
+        self.samples.append(
+            sample
+        )
+
+    # ======================================================
+    # CREATE TRAINING DATA
+    # ======================================================
 
     def get_training_data(
         self,
@@ -71,15 +99,27 @@ class SelfPlayGame:
 
         for sample in self.samples:
 
+            # --------------------------------------------------
+            # Draw
+            # --------------------------------------------------
+
             if result == 0:
 
                 value = 0.0
+
+            # --------------------------------------------------
+            # White won
+            # --------------------------------------------------
 
             elif result == 1:
 
                 value = float(
                     sample.player
                 )
+
+            # --------------------------------------------------
+            # Black won
+            # --------------------------------------------------
 
             else:
 
@@ -88,7 +128,6 @@ class SelfPlayGame:
                 )
 
             training_data.append(
-
                 (
                     sample.state,
                     sample.policy,
@@ -98,6 +137,10 @@ class SelfPlayGame:
 
         return training_data
 
+
+# ==========================================================
+# PLAY ONE SELF-PLAY GAME
+# ==========================================================
 
 def play_game(
 
@@ -119,6 +162,10 @@ def play_game(
 
 ):
 
+    # ======================================================
+    # INITIALIZATION
+    # ======================================================
+
     board = chess.Board()
 
     action_encoder = ActionEncoder()
@@ -128,6 +175,7 @@ def play_game(
         model=model,
 
         action_encoder=action_encoder
+
     )
 
     game = SelfPlayGame()
@@ -140,10 +188,9 @@ def play_game(
 
     termination = "UNKNOWN"
 
-
-    # ==================================================
+    # ======================================================
     # SELF-PLAY LOOP
-    # ==================================================
+    # ======================================================
 
     while not board.is_game_over(
         claim_draw=True
@@ -161,18 +208,19 @@ def play_game(
 
             break
 
-
         # ==================================================
-        # CREATE MCTS ROOT
+        # CREATE ROOT
         # ==================================================
 
         root = Node(
             board
         )
 
-
         # ==================================================
-        # EXPAND ROOT
+        # ROOT EXPANSION
+        #
+        # Root expansion is initialization.
+        # It is NOT counted as an MCTS simulation.
         # ==================================================
 
         root.expand(
@@ -180,11 +228,13 @@ def play_game(
             model,
 
             action_encoder
-        )
 
+        )
 
         # ==================================================
         # DIRICHLET EXPLORATION
+        #
+        # Used during self-play.
         # ==================================================
 
         mcts.add_dirichlet_noise(
@@ -194,39 +244,44 @@ def play_game(
             alpha=dirichlet_alpha,
 
             epsilon=dirichlet_epsilon
-        )
 
+        )
 
         # ==================================================
         # BATCHED MCTS SEARCH
+        #
+        # num_simulations means ACTUAL simulations.
+        #
+        # Example:
+        #
+        # num_simulations=500
+        #
+        # means:
+        #
+        # root initialization
+        # +
+        # 500 actual simulations
         # ==================================================
 
-        remaining_simulations = max(
-            0,
-            num_simulations - 1
-        )
-
-        if remaining_simulations > 0:
+        if num_simulations > 0:
 
             mcts.search_batched(
 
                 root,
 
-                num_simulations=remaining_simulations,
+                num_simulations=num_simulations,
 
                 batch_size=batch_size
+
             )
 
-
         # ==================================================
-        # MCTS POLICY TARGET
+        # GET MCTS POLICY TARGET
         # ==================================================
 
         policy = mcts.get_policy_target(
-
             root
         )
-
 
         # ==================================================
         # STORE POSITION
@@ -237,8 +292,8 @@ def play_game(
             board,
 
             policy
-        )
 
+        )
 
         # ==================================================
         # TEMPERATURE
@@ -252,7 +307,6 @@ def play_game(
 
             current_temperature = 0.0
 
-
         # ==================================================
         # SELECT MOVE
         # ==================================================
@@ -263,9 +317,9 @@ def play_game(
                 root,
 
                 temperature=current_temperature
+
             )
         )
-
 
         # ==================================================
         # PLAY MOVE
@@ -281,10 +335,9 @@ def play_game(
 
         move_number += 1
 
-
-    # ==================================================
-    # GAME ACTUALLY TERMINATED
-    # ==================================================
+    # ======================================================
+    # CHECK WHETHER GAME ACTUALLY TERMINATED
+    # ======================================================
 
     if board.is_game_over(
         claim_draw=True
@@ -295,6 +348,10 @@ def play_game(
         outcome = board.outcome(
             claim_draw=True
         )
+
+        # --------------------------------------------------
+        # Safety fallback
+        # --------------------------------------------------
 
         if outcome is None:
 
@@ -308,22 +365,33 @@ def play_game(
                 outcome.termination
             )
 
+            # --------------------------------------------------
+            # Draw
+            # --------------------------------------------------
+
             if outcome.winner is None:
 
                 result = 0
+
+            # --------------------------------------------------
+            # White won
+            # --------------------------------------------------
 
             elif outcome.winner == chess.WHITE:
 
                 result = 1
 
+            # --------------------------------------------------
+            # Black won
+            # --------------------------------------------------
+
             else:
 
                 result = -1
 
-
-    # ==================================================
+    # ======================================================
     # GAME WAS TRUNCATED
-    # ==================================================
+    # ======================================================
 
     else:
 
@@ -333,10 +401,9 @@ def play_game(
 
         termination = "MAX_MOVES"
 
-
-    # ==================================================
+    # ======================================================
     # STATISTICS
-    # ==================================================
+    # ======================================================
 
     moves_played = len(
         game.samples
@@ -373,10 +440,16 @@ def play_game(
         )
     )
 
-
-    # ==================================================
+    # ======================================================
     # DISCARD INCOMPLETE GAME
-    # ==================================================
+    #
+    # IMPORTANT:
+    #
+    # MAX_MOVES does NOT automatically mean draw.
+    #
+    # We don't know the actual game result, so we discard
+    # the game from the RL training data.
+    # ======================================================
 
     if not completed:
 
@@ -395,17 +468,22 @@ def play_game(
             moves_played=moves_played,
 
             completed=False
+
         )
 
-
-    # ==================================================
+    # ======================================================
     # CREATE TRAINING DATA
-    # ==================================================
+    # ======================================================
 
-    training_data = game.get_training_data(
-        result
+    training_data = (
+        game.get_training_data(
+            result
+        )
     )
 
+    # ======================================================
+    # RETURN RESULT
+    # ======================================================
 
     return SelfPlayResult(
 
@@ -418,4 +496,5 @@ def play_game(
         moves_played=moves_played,
 
         completed=True
-    )   
+
+    )
