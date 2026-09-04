@@ -33,7 +33,7 @@ REPLAY_BUFFER_CHECKPOINT = (
 # SELF-PLAY CONFIGURATION
 # ==========================================================
 
-NUM_SELF_PLAY_GAMES = 5
+NUM_SELF_PLAY_GAMES = 10
 NUM_SIMULATIONS = 50
 MAX_MOVES = 150
 
@@ -57,7 +57,7 @@ REPLAY_BUFFER_CAPACITY = 10000
 # RL TRAINING
 # ==========================================================
 
-TRAINING_BATCH_SIZE = 128
+TRAINING_BATCH_SIZE = 32
 TRAINING_STEPS = 10
 LEARNING_RATE = 1e-4
 
