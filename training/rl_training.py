@@ -16,6 +16,7 @@ from training.checkpoint import load_checkpoint
 # Start RL from your pretrained model.
 # Change this to the latest RL checkpoint for later iterations.
 PREVIOUS_CHECKPOINT = (
+    "/kaggle/input/datasets/arjunthakur9999/"
     "checkpoints/pretrained_1000_games.pt"
 )
 
@@ -32,9 +33,9 @@ REPLAY_BUFFER_CHECKPOINT = (
 # SELF-PLAY CONFIGURATION
 # ==========================================================
 
-NUM_SELF_PLAY_GAMES = 20
-NUM_SIMULATIONS = 100
-MAX_MOVES = 200
+NUM_SELF_PLAY_GAMES = 5
+NUM_SIMULATIONS = 50
+MAX_MOVES = 150
 
 MCTS_BATCH_SIZE = 64
 
@@ -57,7 +58,7 @@ REPLAY_BUFFER_CAPACITY = 10000
 # ==========================================================
 
 TRAINING_BATCH_SIZE = 128
-TRAINING_STEPS = 50
+TRAINING_STEPS = 10
 LEARNING_RATE = 1e-4
 
 
