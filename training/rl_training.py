@@ -55,7 +55,7 @@ REPLAY_BUFFER_CAPACITY = 10000
 # ==========================================================
 
 TRAINING_BATCH_SIZE = 32
-TRAINING_STEPS = 10
+TRAINING_STEPS = 10 
 LEARNING_RATE = 1e-4
 
 
