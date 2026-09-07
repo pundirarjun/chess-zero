@@ -651,16 +651,11 @@ def evaluate_models(
 # ==========================================================
 # MAIN
 # ==========================================================
-
 if __name__ == "__main__":
 
-    # ======================================================
-    # RL ITERATION 1 VS PRETRAINED
-    # ======================================================
-
     evaluate_models(
-        rl_model,
         pretrained_model,
-        "RL Iteration 1",
-        "Pretrained"
+        pretrained_model,
+        "Pretrained A",
+        "Pretrained B"
     )
