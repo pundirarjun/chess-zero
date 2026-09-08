@@ -20,13 +20,16 @@ if PROJECT_ROOT not in sys.path:
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+
+from torch.utils.data import (
+    Dataset,
+    DataLoader,
+    random_split
+)
 
 from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
-
 from training.pgn_dataset import PGNDatasetBuilder
-from training.dataset import ChessDataset
 from training.checkpoint import save_checkpoint
 
 
@@ -45,6 +48,7 @@ PGN_PATH = (
 )
 
 NUM_GAMES = 10000
+
 
 # ----------------------------------------------------------
 # TRAINING
@@ -76,11 +80,16 @@ CHECKPOINT_PATH = (
 # REPRODUCIBILITY
 # ==========================================================
 
-random.seed(RANDOM_SEED)
+random.seed(
+    RANDOM_SEED
+)
 
-torch.manual_seed(RANDOM_SEED)
+torch.manual_seed(
+    RANDOM_SEED
+)
 
 if torch.cuda.is_available():
+
     torch.cuda.manual_seed_all(
         RANDOM_SEED
     )
@@ -102,6 +111,7 @@ print(
 )
 
 if DEVICE.type == "cuda":
+
     print(
         "GPU:",
         torch.cuda.get_device_name(0)
@@ -127,6 +137,59 @@ print(
     "Action space:",
     ACTION_SPACE_SIZE
 )
+
+
+# ==========================================================
+# COMPACT PGN DATASET
+# ==========================================================
+
+class CompactPGNDataset(Dataset):
+
+    def __init__(
+        self,
+        samples
+    ):
+
+        self.samples = samples
+
+
+    def __len__(
+        self
+    ):
+
+        return len(
+            self.samples
+        )
+
+
+    def __getitem__(
+        self,
+        index
+    ):
+
+        state, action_id, value = (
+            self.samples[index]
+        )
+
+        state = torch.from_numpy(
+            state
+        )
+
+        action_id = torch.tensor(
+            action_id,
+            dtype=torch.long
+        )
+
+        value = torch.tensor(
+            value,
+            dtype=torch.float32
+        )
+
+        return (
+            state,
+            action_id,
+            value
+        )
 
 
 # ==========================================================
@@ -163,7 +226,9 @@ samples = builder.build_from_pgn(
     max_games=NUM_GAMES
 )
 
+
 if len(samples) == 0:
+
     raise RuntimeError(
         "No training samples were created."
     )
@@ -179,9 +244,10 @@ print(
 # TRAIN / VALIDATION SPLIT
 # ==========================================================
 
-dataset = ChessDataset(
+dataset = CompactPGNDataset(
     samples
 )
+
 
 validation_size = max(
     1,
@@ -191,14 +257,20 @@ validation_size = max(
     )
 )
 
+
 training_size = (
     len(dataset)
     - validation_size
 )
 
-generator = torch.Generator().manual_seed(
-    RANDOM_SEED
+
+generator = (
+    torch.Generator()
+    .manual_seed(
+        RANDOM_SEED
+    )
 )
+
 
 train_dataset, validation_dataset = (
     random_split(
@@ -231,17 +303,18 @@ train_loader = DataLoader(
     train_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    num_workers=2,
+    num_workers=0,
     pin_memory=(
         DEVICE.type == "cuda"
     )
 )
 
+
 validation_loader = DataLoader(
     validation_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    num_workers=2,
+    num_workers=0,
     pin_memory=(
         DEVICE.type == "cuda"
     )
@@ -299,14 +372,15 @@ def train_epoch():
 
     total_samples = 0
 
-    for states, policies, values in train_loader:
+
+    for states, actions, values in train_loader:
 
         states = states.to(
             DEVICE,
             non_blocking=True
         )
 
-        policies = policies.to(
+        actions = actions.to(
             DEVICE,
             non_blocking=True
         )
@@ -316,30 +390,31 @@ def train_epoch():
             non_blocking=True
         )
 
+
         optimizer.zero_grad(
             set_to_none=True
         )
+
 
         policy_logits, value_pred = (
             model(states)
         )
 
+
         # --------------------------------------------------
         # Policy loss
+        #
+        # The PGN dataset stores the action ID directly.
+        # No 4544-dimensional policy vector is created.
         # --------------------------------------------------
-
-        target_actions = (
-            policies.argmax(
-                dim=1
-            )
-        )
 
         policy_loss = (
             F.cross_entropy(
                 policy_logits,
-                target_actions
+                actions
             )
         )
+
 
         # --------------------------------------------------
         # Value loss
@@ -349,10 +424,12 @@ def train_epoch():
             value_pred.squeeze(-1)
         )
 
+
         value_loss = F.mse_loss(
             value_pred,
             values
         )
+
 
         # --------------------------------------------------
         # Total loss
@@ -363,13 +440,16 @@ def train_epoch():
             + value_loss
         )
 
+
         loss.backward()
 
         optimizer.step()
 
+
         batch_size = (
             states.size(0)
         )
+
 
         total_loss += (
             loss.item()
@@ -389,6 +469,7 @@ def train_epoch():
         total_samples += (
             batch_size
         )
+
 
     return (
         total_loss / total_samples,
@@ -412,14 +493,15 @@ def validate():
 
     total_samples = 0
 
-    for states, policies, values in validation_loader:
+
+    for states, actions, values in validation_loader:
 
         states = states.to(
             DEVICE,
             non_blocking=True
         )
 
-        policies = policies.to(
+        actions = actions.to(
             DEVICE,
             non_blocking=True
         )
@@ -429,40 +511,49 @@ def validate():
             non_blocking=True
         )
 
+
         policy_logits, value_pred = (
             model(states)
         )
 
-        target_actions = (
-            policies.argmax(
-                dim=1
-            )
-        )
+
+        # --------------------------------------------------
+        # Policy loss
+        # --------------------------------------------------
 
         policy_loss = (
             F.cross_entropy(
                 policy_logits,
-                target_actions
+                actions
             )
         )
+
+
+        # --------------------------------------------------
+        # Value loss
+        # --------------------------------------------------
 
         value_pred = (
             value_pred.squeeze(-1)
         )
+
 
         value_loss = F.mse_loss(
             value_pred,
             values
         )
 
+
         loss = (
             policy_loss
             + value_loss
         )
 
+
         batch_size = (
             states.size(0)
         )
+
 
         total_loss += (
             loss.item()
@@ -482,6 +573,7 @@ def validate():
         total_samples += (
             batch_size
         )
+
 
     return (
         total_loss / total_samples,
@@ -531,13 +623,16 @@ for epoch in range(
         f"\nEpoch {epoch}/{EPOCHS}"
     )
 
+
     train_loss, train_policy, train_value = (
         train_epoch()
     )
 
+
     validation_loss, validation_policy, validation_value = (
         validate()
     )
+
 
     print(
         f"Train total: {train_loss:.6f}"
@@ -566,30 +661,36 @@ for epoch in range(
         f"{validation_value:.6f}"
     )
 
+
     # ------------------------------------------------------
-    # Save checkpoint after every epoch
+    # Save checkpoint
     # ------------------------------------------------------
 
     save_checkpoint(
         model=model,
         optimizer=optimizer,
         iteration=epoch,
-        path=CHECKPOINT_PATH,
-        epoch=epoch,
-        num_games=NUM_GAMES,
-        num_samples=len(samples),
-        train_loss=train_loss,
-        train_policy_loss=train_policy,
-        train_value_loss=train_value,
-        validation_loss=validation_loss,
-        validation_policy_loss=validation_policy,
-        validation_value_loss=validation_value
+        path=CHECKPOINT_PATH
     )
+
 
     print(
         "Checkpoint saved:",
         CHECKPOINT_PATH
     )
+
+
+# ==========================================================
+# CLEANUP
+# ==========================================================
+
+del dataset
+del samples
+del builder
+
+if DEVICE.type == "cuda":
+
+    torch.cuda.empty_cache()
 
 
 # ==========================================================
@@ -615,7 +716,8 @@ print(
 
 print(
     "Samples:",
-    len(samples)
+    len(train_dataset)
+    + len(validation_dataset)
 )
 
 print(
