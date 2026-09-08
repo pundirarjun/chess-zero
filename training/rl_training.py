@@ -34,7 +34,7 @@ from training.trainer import train_one_batch
 
 # RL Iteration 1 model
 PREVIOUS_CHECKPOINT = (
-    "checkpoints/rl_iteration_1.pt"
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_1.pt"
 )
 
 # RL Iteration 2 output
