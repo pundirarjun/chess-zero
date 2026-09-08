@@ -80,33 +80,13 @@ class MCTS:
             claim_draw=True
         )
 
-        # Should normally not happen because the caller
-        # already checked is_terminal(), but keep this safe.
-
         if outcome is None:
 
             return 0.0
 
-        # Draw
-
         if outcome.winner is None:
 
             return 0.0
-
-        # IMPORTANT:
-        #
-        # board.turn is the player to move.
-        #
-        # At a checkmate position, board.turn is the player
-        # who has been checkmated.
-        #
-        # Therefore:
-        #
-        # winner == board.turn  -> +1
-        # winner != board.turn  -> -1
-        #
-        # This keeps the value from the current node's
-        # perspective.
 
         if outcome.winner == node.board.turn:
 
@@ -116,13 +96,6 @@ class MCTS:
 
     # ==================================================
     # NORMAL SEARCH
-    #
-    # num_simulations means actual simulations.
-    #
-    # The root must be expanded before simulations begin.
-    # If it is not expanded, expand it once first.
-    #
-    # Root expansion itself does NOT count as a simulation.
     # ==================================================
 
     def search(
@@ -145,18 +118,13 @@ class MCTS:
 
         if not root.is_expanded():
 
-            value = root.expand(
+            root.expand(
                 self.model,
                 self.action_encoder
             )
 
-            # Root evaluation is intentionally not backed up.
-            #
-            # The requested simulation count refers to actual
-            # tree simulations.
-
         # --------------------------------------------------
-        # Actual MCTS simulations
+        # Actual simulations
         # --------------------------------------------------
 
         for _ in range(
@@ -185,13 +153,6 @@ class MCTS:
 
         path = [node]
 
-        # --------------------------------------------------
-        # Traverse the tree using PUCT.
-        #
-        # Virtual visits are already included inside
-        # Node.select_child().
-        # --------------------------------------------------
-
         while (
             node.is_expanded()
             and not node.is_terminal()
@@ -206,12 +167,7 @@ class MCTS:
                 return None, path
 
             # --------------------------------------------------
-            # If this child has already been selected as a leaf
-            # for the current batch, try to avoid selecting it
-            # again.
-            #
-            # Virtual visits normally make this unnecessary,
-            # but the explicit check makes the behavior safer.
+            # Avoid selecting the same leaf twice in a batch.
             # --------------------------------------------------
 
             if id(child) in reserved:
@@ -225,9 +181,10 @@ class MCTS:
                     + node.virtual_visit_count
                 )
 
-                for candidate_move, candidate_child in (
-                    node.children.items()
-                ):
+                for (
+                    candidate_move,
+                    candidate_child
+                ) in node.children.items():
 
                     if id(candidate_child) in reserved:
 
@@ -259,10 +216,6 @@ class MCTS:
 
     # ==================================================
     # EXPAND WITH POLICY
-    #
-    # Kept as a compatibility wrapper.
-    #
-    # Actual expansion is handled by Node.
     # ==================================================
 
     def _expand_with_policy(
@@ -277,11 +230,54 @@ class MCTS:
         )
 
     # ==================================================
+    # BATCH NEURAL NETWORK EVALUATION
+    # ==================================================
+
+    def _evaluate_boards(
+        self,
+        boards
+    ):
+
+        if not boards:
+
+            return None, None
+
+        states = np.stack(
+            [
+                StateEncoder.encode(board)
+                for board in boards
+            ]
+        ).astype(
+            np.float32
+        )
+
+        device = next(
+            self.model.parameters()
+        ).device
+
+        state_tensor = torch.from_numpy(
+            states
+        ).to(
+            device
+        )
+
+        self.model.eval()
+
+        with torch.no_grad():
+
+            policy_logits, values = (
+                self.model(
+                    state_tensor
+                )
+            )
+
+        return (
+            policy_logits,
+            values
+        )
+
+    # ==================================================
     # BATCHED MCTS
-    #
-    # num_simulations = actual simulations.
-    #
-    # Root expansion does NOT consume a simulation.
     # ==================================================
 
     def search_batched(
@@ -301,10 +297,6 @@ class MCTS:
                 "batch_size must be greater than 0."
             )
 
-        # --------------------------------------------------
-        # Terminal root
-        # --------------------------------------------------
-
         if root.is_terminal():
 
             return
@@ -319,10 +311,6 @@ class MCTS:
                 self.model,
                 self.action_encoder
             )
-
-        # --------------------------------------------------
-        # Number of actual simulations completed
-        # --------------------------------------------------
 
         simulations_done = 0
 
@@ -342,8 +330,6 @@ class MCTS:
 
             leaves = []
             paths = []
-
-            # IDs of leaves already selected in this batch.
 
             reserved = set()
 
@@ -366,14 +352,6 @@ class MCTS:
 
                     break
 
-                # --------------------------------------------------
-                # Apply one virtual visit to every node in
-                # this selected path.
-                #
-                # This temporarily discourages another
-                # simulation from following exactly the same path.
-                # --------------------------------------------------
-
                 for node in path:
 
                     node.virtual_visit_count += 1
@@ -389,10 +367,6 @@ class MCTS:
                 reserved.add(
                     id(leaf)
                 )
-
-            # --------------------------------------------------
-            # No leaves selected
-            # --------------------------------------------------
 
             if not leaves:
 
@@ -411,15 +385,9 @@ class MCTS:
 
                 if leaf.is_terminal():
 
-                    # Terminal positions don't need neural
-                    # network evaluation.
-
                     value = self.get_terminal_value(
                         leaf
                     )
-
-                    # Node.backup() also removes one virtual
-                    # visit from every node in this path.
 
                     leaf.backup(
                         value
@@ -441,56 +409,18 @@ class MCTS:
 
             if non_terminal_leaves:
 
-                # --------------------------------------------------
-                # Encode all leaf boards
-                # --------------------------------------------------
-
-                states = np.stack(
-                    [
-                        StateEncoder.encode(
+                policy_logits, values = (
+                    self._evaluate_boards(
+                        [
                             leaf.board
-                        )
-                        for leaf in non_terminal_leaves
-                    ]
-                ).astype(
-                    np.float32
-                )
-
-                # --------------------------------------------------
-                # Get model device
-                # --------------------------------------------------
-
-                device = next(
-                    self.model.parameters()
-                ).device
-
-                # --------------------------------------------------
-                # Convert to tensor
-                # --------------------------------------------------
-
-                state_tensor = torch.from_numpy(
-                    states
-                ).to(
-                    device
-                )
-
-                # --------------------------------------------------
-                # Inference mode
-                # --------------------------------------------------
-
-                self.model.eval()
-
-                with torch.no_grad():
-
-                    policy_logits, values = (
-                        self.model(
-                            state_tensor
-                        )
+                            for leaf in non_terminal_leaves
+                        ]
                     )
+                )
 
-                # ==================================================
-                # EXPAND + BACKUP EACH LEAF
-                # ==================================================
+                # --------------------------------------------------
+                # Expand + backup
+                # --------------------------------------------------
 
                 for batch_index, original_index in enumerate(
                     non_terminal_indices
@@ -500,9 +430,320 @@ class MCTS:
                         original_index
                     ]
 
-                    # --------------------------------------------------
-                    # Convert policy logits into legal-move policy
-                    # --------------------------------------------------
+                    policy = policy_from_logits(
+                        leaf.board,
+                        policy_logits[
+                            batch_index
+                        ],
+                        self.action_encoder
+                    )
+
+                    self._expand_with_policy(
+                        leaf,
+                        policy
+                    )
+
+                    value = values[
+                        batch_index
+                    ].item()
+
+                    leaf.backup(
+                        value
+                    )
+
+            simulations_done += len(
+                leaves
+            )
+
+    # ==================================================
+    # MULTI-GAME ROOT INITIALIZATION
+    # ==================================================
+    #
+    # This evaluates multiple game roots in ONE GPU call.
+    #
+    # Root expansion itself is not counted as a simulation.
+    #
+    # ==================================================
+
+    def _expand_roots_batched(
+        self,
+        roots
+    ):
+
+        pending_roots = [
+            root
+            for root in roots
+            if (
+                not root.is_terminal()
+                and not root.is_expanded()
+            )
+        ]
+
+        if not pending_roots:
+
+            return
+
+        policy_logits, _ = (
+            self._evaluate_boards(
+                [
+                    root.board
+                    for root in pending_roots
+                ]
+            )
+        )
+
+        for index, root in enumerate(
+            pending_roots
+        ):
+
+            policy = policy_from_logits(
+                root.board,
+                policy_logits[index],
+                self.action_encoder
+            )
+
+            self._expand_with_policy(
+                root,
+                policy
+            )
+
+    # ==================================================
+    # MULTI-GAME BATCHED MCTS
+    # ==================================================
+    #
+    # Runs MCTS for several independent game trees while
+    # combining their neural-network evaluations into the
+    # same GPU batches.
+    #
+    # Example:
+    #
+    # Game 1 ─┐
+    # Game 2 ─┤
+    # Game 3 ─┼──> GPU batch
+    # Game 4 ─┤
+    # Game 5 ─┘
+    #
+    # Each root receives exactly num_simulations actual
+    # simulations.
+    #
+    # ==================================================
+
+    def search_batched_multiple(
+        self,
+        roots,
+        num_simulations,
+        batch_size=128
+    ):
+
+        if not roots:
+
+            return
+
+        if num_simulations <= 0:
+
+            return
+
+        if batch_size <= 0:
+
+            raise ValueError(
+                "batch_size must be greater than 0."
+            )
+
+        # --------------------------------------------------
+        # Remove invalid roots.
+        # --------------------------------------------------
+
+        active_roots = [
+            root
+            for root in roots
+            if not root.is_terminal()
+        ]
+
+        if not active_roots:
+
+            return
+
+        # --------------------------------------------------
+        # Batch root initialization.
+        # --------------------------------------------------
+
+        self._expand_roots_batched(
+            active_roots
+        )
+
+        # --------------------------------------------------
+        # Track simulations separately for every game.
+        # --------------------------------------------------
+
+        simulations_done = {
+            id(root): 0
+            for root in active_roots
+        }
+
+        # ==================================================
+        # MULTI-GAME BATCH LOOP
+        # ==================================================
+
+        while True:
+
+            unfinished_roots = [
+                root
+                for root in active_roots
+                if simulations_done[id(root)]
+                < num_simulations
+            ]
+
+            if not unfinished_roots:
+
+                break
+
+            leaves = []
+            paths = []
+            leaf_roots = []
+
+            reserved_by_root = {
+                id(root): set()
+                for root in unfinished_roots
+            }
+
+            # --------------------------------------------------
+            # Fill one combined batch from multiple games.
+            # --------------------------------------------------
+
+            while (
+                len(leaves) < batch_size
+                and unfinished_roots
+            ):
+
+                made_progress = False
+
+                for root in list(
+                    unfinished_roots
+                ):
+
+                    if len(leaves) >= batch_size:
+
+                        break
+
+                    root_id = id(root)
+
+                    if (
+                        simulations_done[root_id]
+                        >= num_simulations
+                    ):
+
+                        unfinished_roots.remove(
+                            root
+                        )
+
+                        continue
+
+                    leaf, path = (
+                        self._select_leaf_for_batch(
+                            root,
+                            reserved_by_root[root_id]
+                        )
+                    )
+
+                    if leaf is None:
+
+                        simulations_done[root_id] = (
+                            num_simulations
+                        )
+
+                        unfinished_roots.remove(
+                            root
+                        )
+
+                        continue
+
+                    for node in path:
+
+                        node.virtual_visit_count += 1
+
+                    leaves.append(
+                        leaf
+                    )
+
+                    paths.append(
+                        path
+                    )
+
+                    leaf_roots.append(
+                        root
+                    )
+
+                    reserved_by_root[root_id].add(
+                        id(leaf)
+                    )
+
+                    made_progress = True
+
+                if not made_progress:
+
+                    break
+
+            if not leaves:
+
+                break
+
+            # ==================================================
+            # TERMINAL / NON-TERMINAL SPLIT
+            # ==================================================
+
+            non_terminal_indices = []
+            non_terminal_leaves = []
+
+            for index, leaf in enumerate(
+                leaves
+            ):
+
+                if leaf.is_terminal():
+
+                    value = self.get_terminal_value(
+                        leaf
+                    )
+
+                    leaf.backup(
+                        value
+                    )
+
+                else:
+
+                    non_terminal_indices.append(
+                        index
+                    )
+
+                    non_terminal_leaves.append(
+                        leaf
+                    )
+
+            # ==================================================
+            # ONE COMBINED GPU EVALUATION
+            # ==================================================
+
+            if non_terminal_leaves:
+
+                policy_logits, values = (
+                    self._evaluate_boards(
+                        [
+                            leaf.board
+                            for leaf in non_terminal_leaves
+                        ]
+                    )
+                )
+
+                # --------------------------------------------------
+                # Expand + backup.
+                # --------------------------------------------------
+
+                for batch_index, original_index in enumerate(
+                    non_terminal_indices
+                ):
+
+                    leaf = leaves[
+                        original_index
+                    ]
 
                     policy = policy_from_logits(
                         leaf.board,
@@ -512,51 +753,30 @@ class MCTS:
                         self.action_encoder
                     )
 
-                    # --------------------------------------------------
-                    # Expand leaf
-                    # --------------------------------------------------
-
                     self._expand_with_policy(
                         leaf,
                         policy
                     )
 
-                    # --------------------------------------------------
-                    # Neural-network value
-                    # --------------------------------------------------
-
                     value = values[
                         batch_index
                     ].item()
-
-                    # --------------------------------------------------
-                    # Backup
-                    #
-                    # This ALSO removes one virtual visit from
-                    # every node in the path.
-                    # --------------------------------------------------
 
                     leaf.backup(
                         value
                     )
 
             # --------------------------------------------------
-            # IMPORTANT
-            #
-            # DO NOT manually remove virtual visits here.
-            #
-            # Node.backup() already does that.
+            # Every selected leaf represents one actual
+            # simulation for its corresponding game.
             # --------------------------------------------------
 
-            simulations_done += len(
-                leaves
-            )
+            for root in leaf_roots:
+
+                simulations_done[id(root)] += 1
 
     # ==================================================
     # SELECT ACTION
-    #
-    # Deterministic:
-    # choose the child with the highest visit count.
     # ==================================================
 
     def select_action(
@@ -594,9 +814,6 @@ class MCTS:
 
     # ==================================================
     # SELECT MOVE
-    #
-    # Convenience method for playing a move using
-    # normal MCTS.
     # ==================================================
 
     def select_move(
@@ -609,15 +826,10 @@ class MCTS:
             board
         )
 
-        # Root is initialized inside search().
         self.search(
             root,
             num_simulations
         )
-
-        # --------------------------------------------------
-        # Sort moves by visit count
-        # --------------------------------------------------
 
         sorted_children = sorted(
             root.children.items(),
@@ -658,9 +870,6 @@ class MCTS:
 
     # ==================================================
     # POLICY TARGET
-    #
-    # Converts root visit counts into a probability
-    # distribution over the 4544-action space.
     # ==================================================
 
     def get_policy_target(
@@ -700,12 +909,6 @@ class MCTS:
 
     # ==================================================
     # TEMPERATURE ACTION
-    #
-    # temperature > 0:
-    #   sample according to visit counts.
-    #
-    # temperature <= 0:
-    #   choose highest visit count.
     # ==================================================
 
     def select_action_with_temperature(
@@ -732,10 +935,6 @@ class MCTS:
             dtype=np.float64
         )
 
-        # --------------------------------------------------
-        # Deterministic selection
-        # --------------------------------------------------
-
         if temperature <= 0:
 
             best_index = np.argmax(
@@ -746,18 +945,12 @@ class MCTS:
                 best_index
             ]
 
-        # --------------------------------------------------
-        # Temperature scaling
-        # --------------------------------------------------
-
         visits = (
             visits
             ** (1.0 / temperature)
         )
 
         total = visits.sum()
-
-        # Safety fallback.
 
         if total <= 0:
 
@@ -766,7 +959,9 @@ class MCTS:
                 dtype=np.float64
             )
 
-            probabilities /= probabilities.sum()
+            probabilities /= (
+                probabilities.sum()
+            )
 
         else:
 
@@ -774,10 +969,6 @@ class MCTS:
                 visits
                 / total
             )
-
-        # --------------------------------------------------
-        # Sample action
-        # --------------------------------------------------
 
         selected_index = (
             np.random.choice(
@@ -792,10 +983,6 @@ class MCTS:
 
     # ==================================================
     # DIRICHLET NOISE
-    #
-    # Used during self-play only.
-    #
-    # It should NOT be used during evaluation.
     # ==================================================
 
     def add_dirichlet_noise(
