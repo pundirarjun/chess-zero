@@ -32,18 +32,23 @@ from training.trainer import train_one_batch
 # CONFIGURATION
 # ==========================================================
 
-# RL Iteration 1 model
+# RL1 model
 PREVIOUS_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_1.pt"
 )
 
-# RL Iteration 2 output
+# RL1 replay buffer
+PREVIOUS_REPLAY_BUFFER = (
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/replay_buffer_rl1.pt"
+)
+
+# RL2 model output
 OUTPUT_CHECKPOINT = (
     "checkpoints/rl_iteration_2.pt"
 )
 
-# RL Iteration 2 replay buffer
-REPLAY_BUFFER_CHECKPOINT = (
+# RL2 replay buffer output
+OUTPUT_REPLAY_BUFFER = (
     "checkpoints/replay_buffer_rl2.pt"
 )
 
@@ -52,12 +57,13 @@ REPLAY_BUFFER_CHECKPOINT = (
 # SELF-PLAY CONFIGURATION
 # ==========================================================
 
-NUM_SELF_PLAY_GAMES = 3
+NUM_SELF_PLAY_GAMES = 10
 
 NUM_SIMULATIONS = 50
 
 MAX_MOVES = 300
 
+# Benchmark showed 128 as fastest.
 MCTS_BATCH_SIZE = 128
 
 TEMPERATURE = 1.0
@@ -82,7 +88,7 @@ REPLAY_BUFFER_CAPACITY = 50000
 
 TRAINING_BATCH_SIZE = 32
 
-TRAINING_STEPS = 200
+TRAINING_STEPS = 50
 
 LEARNING_RATE = 1e-4
 
@@ -135,7 +141,7 @@ def create_optimizer(model):
 
 
 # ==========================================================
-# LOAD PREVIOUS RL CHECKPOINT
+# LOAD PREVIOUS MODEL
 # ==========================================================
 
 def load_previous_checkpoint(
@@ -147,9 +153,8 @@ def load_previous_checkpoint(
     if not os.path.exists(checkpoint_path):
 
         raise FileNotFoundError(
-            f"Starting checkpoint not found: "
-            f"{checkpoint_path}\n"
-            f"Run RL Iteration 1 first."
+            f"Starting checkpoint not found:\n"
+            f"{checkpoint_path}"
         )
 
     checkpoint = torch.load(
@@ -162,7 +167,7 @@ def load_previous_checkpoint(
         checkpoint["model_state_dict"]
     )
 
-    # RL starts with a fresh optimizer.
+    # RL uses a fresh optimizer.
     for param_group in optimizer.param_groups:
         param_group["lr"] = LEARNING_RATE
 
@@ -170,6 +175,51 @@ def load_previous_checkpoint(
     model.train()
 
     return checkpoint
+
+
+# ==========================================================
+# LOAD PREVIOUS REPLAY BUFFER
+# ==========================================================
+
+def load_previous_replay_buffer(
+    path
+):
+
+    if not os.path.exists(path):
+
+        raise FileNotFoundError(
+            f"Previous replay buffer not found:\n"
+            f"{path}"
+        )
+
+    data = torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False
+    )
+
+    if not isinstance(data, list):
+
+        raise RuntimeError(
+            "Invalid replay buffer format."
+        )
+
+    replay_buffer = ReplayBuffer(
+        capacity=REPLAY_BUFFER_CAPACITY
+    )
+
+    replay_buffer.add(data)
+
+    print(
+        "\nPrevious replay buffer loaded."
+    )
+
+    print(
+        "Previous samples:",
+        len(replay_buffer)
+    )
+
+    return replay_buffer
 
 
 # ==========================================================
@@ -249,7 +299,7 @@ def generate_self_play_data(
         completed_games += 1
 
         # --------------------------------------------------
-        # Add training data
+        # Add new training data
         # --------------------------------------------------
 
         if result.training_data:
@@ -648,8 +698,18 @@ def main():
     )
 
     print(
+        "Previous replay buffer:",
+        PREVIOUS_REPLAY_BUFFER
+    )
+
+    print(
         "Output checkpoint:",
         OUTPUT_CHECKPOINT
+    )
+
+    print(
+        "Output replay buffer:",
+        OUTPUT_REPLAY_BUFFER
     )
 
     # ------------------------------------------------------
@@ -664,7 +724,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Create fresh RL optimizer
+    # Create fresh optimizer
     # ------------------------------------------------------
 
     optimizer = create_optimizer(
@@ -708,19 +768,15 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Fresh replay buffer
+    # Load RL1 replay buffer
     # ------------------------------------------------------
 
-    replay_buffer = ReplayBuffer(
-        capacity=REPLAY_BUFFER_CAPACITY
-    )
-
-    print(
-        "\nStarting with a FRESH replay buffer."
+    replay_buffer = load_previous_replay_buffer(
+        PREVIOUS_REPLAY_BUFFER
     )
 
     # ------------------------------------------------------
-    # Self-play
+    # Generate new self-play data
     # ------------------------------------------------------
 
     self_play_stats = generate_self_play_data(
@@ -736,17 +792,17 @@ def main():
 
         raise RuntimeError(
             f"Only {len(replay_buffer)} training samples "
-            f"were generated. Need at least "
+            f"are available. Need at least "
             f"{TRAINING_BATCH_SIZE}."
         )
 
     # ------------------------------------------------------
-    # Save replay buffer
+    # Save updated replay buffer
     # ------------------------------------------------------
 
     save_replay_buffer(
         replay_buffer,
-        REPLAY_BUFFER_CHECKPOINT
+        OUTPUT_REPLAY_BUFFER
     )
 
     # ------------------------------------------------------
@@ -760,7 +816,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Save RL checkpoint
+    # Save RL2 checkpoint
     # ------------------------------------------------------
 
     save_rl_checkpoint(
@@ -793,7 +849,7 @@ def main():
 
     print(
         "Replay buffer:",
-        REPLAY_BUFFER_CHECKPOINT
+        OUTPUT_REPLAY_BUFFER
     )
 
 
