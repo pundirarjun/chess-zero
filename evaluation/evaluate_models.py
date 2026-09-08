@@ -33,7 +33,7 @@ from mcts.mcts import MCTS
 # CONFIGURATION
 # ==========================================================
 
-# Number of evaluation games per matchup
+# Number of evaluation games
 NUM_GAMES = 10
 
 # MCTS simulations per move
@@ -55,6 +55,15 @@ DEVICE = torch.device(
     "cuda"
     if torch.cuda.is_available()
     else "cpu"
+)
+
+
+# ==========================================================
+# CHECKPOINT
+# ==========================================================
+
+PRETRAINED_CHECKPOINT = (
+    "checkpoints/pretrained_phase1.pt"
 )
 
 
@@ -116,51 +125,50 @@ def load_model(
 
 
 # ==========================================================
-# CREATE MODELS
+# CREATE MODEL
 # ==========================================================
 
 pretrained_model = create_model()
-rl_model = create_model()
 
 
 # ==========================================================
-# LOAD PRETRAINED MODEL
+# LOAD PHASE 1 PRETRAINED MODEL
 # ==========================================================
 
 pretrained_checkpoint = load_model(
     pretrained_model,
-    "checkpoints/pretrained_1000_games.pt"
+    PRETRAINED_CHECKPOINT
 )
 
-print("\nLoaded pretrained model.")
+print(
+    "\nLoaded Phase 1 pretrained model."
+)
 
-
-if "iteration" in pretrained_checkpoint:
-
-    print(
-        "Pretrained checkpoint iteration:",
-        pretrained_checkpoint["iteration"]
-    )
+print(
+    "Checkpoint:",
+    PRETRAINED_CHECKPOINT
+)
 
 
 # ==========================================================
-# LOAD RL MODEL
+# CHECKPOINT INFORMATION
 # ==========================================================
 
-rl_checkpoint = load_model(
-    rl_model,
-    "checkpoints/rl_iteration_1.pt"
-)
+print("\nCheckpoint information:")
 
-print("Loaded RL Iteration 1 model.")
+for key in [
+    "iteration",
+    "epoch",
+    "num_games",
+    "num_samples"
+]:
 
+    if key in pretrained_checkpoint:
 
-if "iteration" in rl_checkpoint:
-
-    print(
-        "RL checkpoint iteration:",
-        rl_checkpoint["iteration"]
-    )
+        print(
+            f"{key}:",
+            pretrained_checkpoint[key]
+        )
 
 
 # ==========================================================
@@ -168,7 +176,6 @@ if "iteration" in rl_checkpoint:
 # ==========================================================
 
 pretrained_model.eval()
-rl_model.eval()
 
 
 # ==========================================================
@@ -385,6 +392,7 @@ def evaluate_models(
 
     print("Games:", NUM_GAMES)
     print("MCTS simulations:", NUM_SIMULATIONS)
+
     print(
         "Evaluation temperature:",
         EVALUATION_TEMPERATURE
@@ -455,12 +463,10 @@ def evaluate_models(
 
         if result["result"] is None:
 
-            # MAX_MOVES
             truncated += 1
 
         elif result["result"] == "1/2-1/2":
 
-            # Actual chess draw
             true_draws += 1
 
         elif (
@@ -651,11 +657,12 @@ def evaluate_models(
 # ==========================================================
 # MAIN
 # ==========================================================
+
 if __name__ == "__main__":
 
     evaluate_models(
         pretrained_model,
         pretrained_model,
-        "Pretrained A",
-        "Pretrained B"
+        "Phase 1 Pretrained A",
+        "Phase 1 Pretrained B"
     )
