@@ -30,7 +30,6 @@ from training.checkpoint import load_checkpoint
 
 # Start RL from the new Phase 1 pretrained model.
 PREVIOUS_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/"
     "checkpoints/pretrained_phase1.pt"
 )
 
