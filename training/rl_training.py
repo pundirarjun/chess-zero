@@ -1,5 +1,20 @@
 import os
 import torch
+import sys
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import torch
+
+from model.chess_net import ChessNet
+
 
 from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
