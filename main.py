@@ -159,9 +159,7 @@ print(
 )
 
 
-builder = PGNDatasetBuilder(
-    action_encoder=action_encoder
-)
+builder = PGNDatasetBuilder()
 
 samples = builder.build_from_pgn(
     PGN_PATH,
