@@ -35,7 +35,7 @@ from mcts.mcts import MCTS
 
 NUM_GAMES = 10
 
-NUM_SIMULATIONS = 100
+NUM_SIMULATIONS = 50
 
 MAX_MOVES = 300
 
