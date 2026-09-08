@@ -1,10 +1,15 @@
 import chess
 import chess.pgn
+
 import numpy as np
 
 from environment.state_encoder import StateEncoder
 from environment.action_encoder import ActionEncoder
 
+
+# ==========================================================
+# PGN DATASET BUILDER
+# ==========================================================
 
 class PGNDatasetBuilder:
 
@@ -14,9 +19,10 @@ class PGNDatasetBuilder:
 
         self.samples = []
 
-    # ======================================================
+
+    # ==========================================================
     # PROCESS ONE GAME
-    # ======================================================
+    # ==========================================================
 
     def process_game(
         self,
@@ -25,14 +31,16 @@ class PGNDatasetBuilder:
 
         board = game.board()
 
-        # --------------------------------------------------
+
+        # ------------------------------------------------------
         # Determine game result
-        # --------------------------------------------------
+        # ------------------------------------------------------
 
         result = game.headers.get(
             "Result",
             "*"
         )
+
 
         if result == "1-0":
 
@@ -48,22 +56,23 @@ class PGNDatasetBuilder:
 
         else:
 
-            # Unknown / unfinished game.
             return
 
-        # ==================================================
-        # PROCESS MOVES
-        # ==================================================
+
+        # ------------------------------------------------------
+        # Process moves
+        # ------------------------------------------------------
 
         for move in game.mainline_moves():
 
             # --------------------------------------------------
-            # Store position BEFORE the move
+            # Store position BEFORE move
             # --------------------------------------------------
 
             state = StateEncoder.encode(
                 board
             )
+
 
             # --------------------------------------------------
             # Validate move
@@ -73,8 +82,9 @@ class PGNDatasetBuilder:
 
                 return
 
+
             # --------------------------------------------------
-            # Convert move to action ID
+            # Encode move
             # --------------------------------------------------
 
             try:
@@ -89,16 +99,6 @@ class PGNDatasetBuilder:
 
                 return
 
-            # --------------------------------------------------
-            # Create one-hot policy target
-            # --------------------------------------------------
-
-            policy = np.zeros(
-                self.action_encoder.size(),
-                dtype=np.float32
-            )
-
-            policy[action_id] = 1.0
 
             # --------------------------------------------------
             # Value from current player's perspective
@@ -116,17 +116,30 @@ class PGNDatasetBuilder:
 
                 value = -1.0
 
+
             # --------------------------------------------------
-            # Store sample
+            # Store compact training sample
+            #
+            # Instead of:
+            #
+            #     4544-dimensional one-hot policy
+            #
+            # store:
+            #
+            #     action_id
+            #
+            # The action_id contains exactly the same
+            # supervised move information.
             # --------------------------------------------------
 
             self.samples.append(
                 (
                     state,
-                    policy,
-                    value
+                    np.int16(action_id),
+                    np.float32(value)
                 )
             )
+
 
             # --------------------------------------------------
             # Play move
@@ -136,9 +149,10 @@ class PGNDatasetBuilder:
                 move
             )
 
-    # ======================================================
-    # BUILD DATASET FROM PGN
-    # ======================================================
+
+    # ==========================================================
+    # BUILD DATASET
+    # ==========================================================
 
     def build_from_pgn(
         self,
@@ -147,6 +161,7 @@ class PGNDatasetBuilder:
     ):
 
         games_processed = 0
+
 
         with open(
             pgn_path,
@@ -168,6 +183,7 @@ class PGNDatasetBuilder:
 
                     break
 
+
                 # --------------------------------------------------
                 # Read next game
                 # --------------------------------------------------
@@ -176,9 +192,11 @@ class PGNDatasetBuilder:
                     file
                 )
 
+
                 if game is None:
 
                     break
+
 
                 # --------------------------------------------------
                 # Process game
@@ -188,7 +206,13 @@ class PGNDatasetBuilder:
                     game
                 )
 
+
                 games_processed += 1
+
+
+        # ======================================================
+        # SUMMARY
+        # ======================================================
 
         print(
             "Games processed:",
@@ -199,5 +223,6 @@ class PGNDatasetBuilder:
             "Samples generated:",
             len(self.samples)
         )
+
 
         return self.samples
