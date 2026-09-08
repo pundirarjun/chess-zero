@@ -1,5 +1,6 @@
 import sys
 import os
+import random
 
 # ==========================================================
 # MAKE PROJECT ROOT IMPORTABLE
@@ -10,10 +11,7 @@ PROJECT_ROOT = os.path.dirname(
 )
 
 if PROJECT_ROOT not in sys.path:
-
-    sys.path.append(
-        PROJECT_ROOT
-    )
+    sys.path.append(PROJECT_ROOT)
 
 
 # ==========================================================
@@ -21,30 +19,74 @@ if PROJECT_ROOT not in sys.path:
 # ==========================================================
 
 import torch
-import chess
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, random_split
 
 from model.chess_net import ChessNet
-
 from environment.action_encoder import ActionEncoder
 
-from mcts.node import Node
-from mcts.mcts import MCTS
+from training.pgn_dataset import PGNDatasetBuilder
+from training.dataset import ChessDataset
+from training.checkpoint import save_checkpoint
 
 
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
 
-CHECKPOINT = (
-    "checkpoints/rl_iteration_4.pt"
+# ----------------------------------------------------------
+# PGN DATASET
+# ----------------------------------------------------------
+
+PGN_PATH = (
+    "/kaggle/input/datasets/"
+    "arjunthakur9999/chess-dataset/"
+    "lichess_2013_01.pgn"
 )
 
-SIMULATION_COUNTS = [
-    25,
-    50,
-    100,
-    250
-]
+# Start with 1,000 games for the first serious run.
+# Increase later after confirming everything works.
+NUM_GAMES = 1000
+
+
+# ----------------------------------------------------------
+# TRAINING
+# ----------------------------------------------------------
+
+EPOCHS = 5
+
+BATCH_SIZE = 128
+
+LEARNING_RATE = 1e-3
+
+WEIGHT_DECAY = 1e-4
+
+VALIDATION_SPLIT = 0.05
+
+RANDOM_SEED = 42
+
+
+# ----------------------------------------------------------
+# CHECKPOINT
+# ----------------------------------------------------------
+
+CHECKPOINT_PATH = (
+    "checkpoints/pretrained_phase1.pt"
+)
+
+
+# ==========================================================
+# REPRODUCIBILITY
+# ==========================================================
+
+random.seed(RANDOM_SEED)
+
+torch.manual_seed(RANDOM_SEED)
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(
+        RANDOM_SEED
+    )
 
 
 # ==========================================================
@@ -52,17 +94,26 @@ SIMULATION_COUNTS = [
 # ==========================================================
 
 DEVICE = torch.device(
-
     "cuda"
     if torch.cuda.is_available()
     else "cpu"
-
 )
 
 print(
     "Device:",
     DEVICE
 )
+
+if DEVICE.type == "cuda":
+    print(
+        "GPU:",
+        torch.cuda.get_device_name(0)
+    )
+
+    print(
+        "CUDA:",
+        torch.version.cuda
+    )
 
 
 # ==========================================================
@@ -71,9 +122,134 @@ print(
 
 action_encoder = ActionEncoder()
 
+ACTION_SPACE_SIZE = (
+    action_encoder.size()
+)
+
 print(
     "Action space:",
-    action_encoder.size()
+    ACTION_SPACE_SIZE
+)
+
+
+# ==========================================================
+# BUILD PGN DATASET
+# ==========================================================
+
+print(
+    "\n=============================="
+)
+
+print(
+    "BUILDING PGN DATASET"
+)
+
+print(
+    "=============================="
+)
+
+print(
+    "PGN:",
+    PGN_PATH
+)
+
+print(
+    "Games:",
+    NUM_GAMES
+)
+
+
+builder = PGNDatasetBuilder(
+    action_encoder=action_encoder
+)
+
+samples = builder.build_from_pgn(
+    PGN_PATH,
+    max_games=NUM_GAMES
+)
+
+if len(samples) == 0:
+    raise RuntimeError(
+        "No training samples were created."
+    )
+
+
+print(
+    "\nTotal samples:",
+    len(samples)
+)
+
+
+# ==========================================================
+# TRAIN / VALIDATION SPLIT
+# ==========================================================
+
+dataset = ChessDataset(
+    samples
+)
+
+validation_size = max(
+    1,
+    int(
+        len(dataset)
+        * VALIDATION_SPLIT
+    )
+)
+
+training_size = (
+    len(dataset)
+    - validation_size
+)
+
+generator = torch.Generator().manual_seed(
+    RANDOM_SEED
+)
+
+train_dataset, validation_dataset = (
+    random_split(
+        dataset,
+        [
+            training_size,
+            validation_size
+        ],
+        generator=generator
+    )
+)
+
+
+print(
+    "Training samples:",
+    training_size
+)
+
+print(
+    "Validation samples:",
+    validation_size
+)
+
+
+# ==========================================================
+# DATA LOADERS
+# ==========================================================
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=2,
+    pin_memory=(
+        DEVICE.type == "cuda"
+    )
+)
+
+validation_loader = DataLoader(
+    validation_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=(
+        DEVICE.type == "cuda"
+    )
 )
 
 
@@ -81,11 +257,21 @@ print(
 # CREATE MODEL
 # ==========================================================
 
+print(
+    "\n=============================="
+)
+
+print(
+    "CREATING MODEL"
+)
+
+print(
+    "=============================="
+)
+
+
 model = ChessNet(
-
-    action_space_size=
-        action_encoder.size()
-
+    action_space_size=ACTION_SPACE_SIZE
 )
 
 model.to(
@@ -94,201 +280,223 @@ model.to(
 
 
 # ==========================================================
-# LOAD CHECKPOINT
+# OPTIMIZER
 # ==========================================================
 
-checkpoint = torch.load(
-
-    CHECKPOINT,
-
-    map_location=DEVICE,
-
-    weights_only=False
-
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=LEARNING_RATE,
+    weight_decay=WEIGHT_DECAY
 )
 
-model.load_state_dict(
 
-    checkpoint[
-        "model_state_dict"
-    ]
+# ==========================================================
+# TRAINING FUNCTION
+# ==========================================================
 
-)
+def train_epoch():
 
-model.eval()
+    model.train()
 
+    total_loss = 0.0
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
 
-print(
-    "Checkpoint loaded:",
-    CHECKPOINT
-)
+    total_samples = 0
 
-if "iteration" in checkpoint:
+    for states, policies, values in train_loader:
 
-    print(
-        "Checkpoint iteration:",
-        checkpoint["iteration"]
+        states = states.to(
+            DEVICE,
+            non_blocking=True
+        )
+
+        policies = policies.to(
+            DEVICE,
+            non_blocking=True
+        )
+
+        values = values.to(
+            DEVICE,
+            non_blocking=True
+        )
+
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+        policy_logits, value_pred = (
+            model(states)
+        )
+
+        # --------------------------------------------------
+        # Policy loss
+        # --------------------------------------------------
+
+        target_actions = (
+            policies.argmax(
+                dim=1
+            )
+        )
+
+        policy_loss = (
+            F.cross_entropy(
+                policy_logits,
+                target_actions
+            )
+        )
+
+        # --------------------------------------------------
+        # Value loss
+        # --------------------------------------------------
+
+        value_pred = (
+            value_pred.squeeze(-1)
+        )
+
+        value_loss = F.mse_loss(
+            value_pred,
+            values
+        )
+
+        # --------------------------------------------------
+        # Total loss
+        # --------------------------------------------------
+
+        loss = (
+            policy_loss
+            + value_loss
+        )
+
+        loss.backward()
+
+        optimizer.step()
+
+        batch_size = (
+            states.size(0)
+        )
+
+        total_loss += (
+            loss.item()
+            * batch_size
+        )
+
+        total_policy_loss += (
+            policy_loss.item()
+            * batch_size
+        )
+
+        total_value_loss += (
+            value_loss.item()
+            * batch_size
+        )
+
+        total_samples += (
+            batch_size
+        )
+
+    return (
+        total_loss / total_samples,
+        total_policy_loss / total_samples,
+        total_value_loss / total_samples
     )
 
 
 # ==========================================================
-# TACTICAL POSITION
+# VALIDATION FUNCTION
 # ==========================================================
 
-board = chess.Board()
+@torch.no_grad()
+def validate():
 
-board.clear()
+    model.eval()
 
+    total_loss = 0.0
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
 
-# ==========================================================
-# BLACK KING
-# ==========================================================
+    total_samples = 0
 
-board.set_piece_at(
+    for states, policies, values in validation_loader:
 
-    chess.G8,
+        states = states.to(
+            DEVICE,
+            non_blocking=True
+        )
 
-    chess.Piece(
-        chess.KING,
-        chess.BLACK
+        policies = policies.to(
+            DEVICE,
+            non_blocking=True
+        )
+
+        values = values.to(
+            DEVICE,
+            non_blocking=True
+        )
+
+        policy_logits, value_pred = (
+            model(states)
+        )
+
+        target_actions = (
+            policies.argmax(
+                dim=1
+            )
+        )
+
+        policy_loss = (
+            F.cross_entropy(
+                policy_logits,
+                target_actions
+            )
+        )
+
+        value_pred = (
+            value_pred.squeeze(-1)
+        )
+
+        value_loss = F.mse_loss(
+            value_pred,
+            values
+        )
+
+        loss = (
+            policy_loss
+            + value_loss
+        )
+
+        batch_size = (
+            states.size(0)
+        )
+
+        total_loss += (
+            loss.item()
+            * batch_size
+        )
+
+        total_policy_loss += (
+            policy_loss.item()
+            * batch_size
+        )
+
+        total_value_loss += (
+            value_loss.item()
+            * batch_size
+        )
+
+        total_samples += (
+            batch_size
+        )
+
+    return (
+        total_loss / total_samples,
+        total_policy_loss / total_samples,
+        total_value_loss / total_samples
     )
 
-)
-
 
 # ==========================================================
-# BLACK QUEEN
-# ==========================================================
-
-board.set_piece_at(
-
-    chess.D5,
-
-    chess.Piece(
-        chess.QUEEN,
-        chess.BLACK
-    )
-
-)
-
-
-# ==========================================================
-# BLACK PAWNS
-# ==========================================================
-
-board.set_piece_at(
-
-    chess.F7,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.BLACK
-    )
-
-)
-
-board.set_piece_at(
-
-    chess.G7,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.BLACK
-    )
-
-)
-
-board.set_piece_at(
-
-    chess.H7,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.BLACK
-    )
-
-)
-
-
-# ==========================================================
-# WHITE QUEEN
-# ==========================================================
-
-board.set_piece_at(
-
-    chess.E4,
-
-    chess.Piece(
-        chess.QUEEN,
-        chess.WHITE
-    )
-
-)
-
-
-# ==========================================================
-# WHITE KING
-# ==========================================================
-
-board.set_piece_at(
-
-    chess.G1,
-
-    chess.Piece(
-        chess.KING,
-        chess.WHITE
-    )
-
-)
-
-
-# ==========================================================
-# WHITE PAWNS
-# ==========================================================
-
-board.set_piece_at(
-
-    chess.F2,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.WHITE
-    )
-
-)
-
-board.set_piece_at(
-
-    chess.G2,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.WHITE
-    )
-
-)
-
-board.set_piece_at(
-
-    chess.H2,
-
-    chess.Piece(
-        chess.PAWN,
-        chess.WHITE
-    )
-
-)
-
-
-# ==========================================================
-# GAME STATE
-# ==========================================================
-
-board.turn = chess.WHITE
-
-
-# ==========================================================
-# PRINT POSITION
+# PRETRAINING
 # ==========================================================
 
 print(
@@ -296,7 +504,7 @@ print(
 )
 
 print(
-    "TACTICAL POSITION"
+    "PHASE 1 PRETRAINING"
 )
 
 print(
@@ -304,170 +512,130 @@ print(
 )
 
 print(
-    board
+    "Epochs:",
+    EPOCHS
+)
+
+print(
+    "Batch size:",
+    BATCH_SIZE
+)
+
+print(
+    "Learning rate:",
+    LEARNING_RATE
 )
 
 
+for epoch in range(
+    1,
+    EPOCHS + 1
+):
+
+    print(
+        f"\nEpoch {epoch}/{EPOCHS}"
+    )
+
+    train_loss, train_policy, train_value = (
+        train_epoch()
+    )
+
+    validation_loss, validation_policy, validation_value = (
+        validate()
+    )
+
+    print(
+        f"Train total: {train_loss:.6f}"
+    )
+
+    print(
+        f"Train policy: {train_policy:.6f}"
+    )
+
+    print(
+        f"Train value: {train_value:.6f}"
+    )
+
+    print(
+        f"Validation total: "
+        f"{validation_loss:.6f}"
+    )
+
+    print(
+        f"Validation policy: "
+        f"{validation_policy:.6f}"
+    )
+
+    print(
+        f"Validation value: "
+        f"{validation_value:.6f}"
+    )
+
+    # ------------------------------------------------------
+    # Save checkpoint after every epoch
+    # ------------------------------------------------------
+
+    save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        iteration=epoch,
+        path=CHECKPOINT_PATH,
+        epoch=epoch,
+        num_games=NUM_GAMES,
+        num_samples=len(samples),
+        train_loss=train_loss,
+        train_policy_loss=train_policy,
+        train_value_loss=train_value,
+        validation_loss=validation_loss,
+        validation_policy_loss=validation_policy,
+        validation_value_loss=validation_value
+    )
+
+    print(
+        "Checkpoint saved:",
+        CHECKPOINT_PATH
+    )
+
+
 # ==========================================================
-# BASIC POSITION CHECK
+# COMPLETE
 # ==========================================================
 
 print(
-    "\nLegal moves:",
-    board.legal_moves.count()
+    "\n=============================="
 )
 
+print(
+    "PHASE 1 PRETRAINING COMPLETE"
+)
 
-# ==========================================================
-# RUN MCTS TESTS
-# ==========================================================
+print(
+    "=============================="
+)
 
-for simulations in SIMULATION_COUNTS:
+print(
+    "Games:",
+    NUM_GAMES
+)
 
-    print(
-        "\n=============================="
-    )
+print(
+    "Samples:",
+    len(samples)
+)
 
-    print(
-        f"MCTS: {simulations} SIMULATIONS"
-    )
+print(
+    "Checkpoint:",
+    CHECKPOINT_PATH
+)
 
-    print(
-        "=============================="
-    )
+print(
+    "\nThis checkpoint can now be"
+)
 
+print(
+    "used as the starting model"
+)
 
-    # ------------------------------------------------------
-    # Create MCTS
-    # ------------------------------------------------------
-
-    mcts = MCTS(
-
-        model=model,
-
-        action_encoder=
-            action_encoder
-
-    )
-
-
-    # ------------------------------------------------------
-    # Create fresh root
-    # ------------------------------------------------------
-
-    root = Node(
-        board
-    )
-
-
-    # ------------------------------------------------------
-    # Run exactly N simulations
-    # ------------------------------------------------------
-
-    mcts.search(
-
-        root,
-
-        num_simulations=
-            simulations
-
-    )
-
-
-    # ------------------------------------------------------
-    # Check root
-    # ------------------------------------------------------
-
-    print(
-        "Root visits:",
-        root.visit_count
-    )
-
-    print(
-        "Root children:",
-        len(root.children)
-    )
-
-
-    # ------------------------------------------------------
-    # Sort children
-    # ------------------------------------------------------
-
-    sorted_children = sorted(
-
-        root.children.items(),
-
-        key=lambda item:
-            item[1].visit_count,
-
-        reverse=True
-
-    )
-
-
-    # ======================================================
-    # PRINT TOP MOVES
-    # ======================================================
-
-    print(
-        "\nTop moves:"
-    )
-
-    for move, child in (
-        sorted_children[:10]
-    ):
-
-        print(
-
-            f"{move} | "
-
-            f"visits: "
-            f"{child.visit_count} | "
-
-            f"value: "
-            f"{child.value:.4f} | "
-
-            f"prior: "
-            f"{child.prior:.4f}"
-
-        )
-
-
-    # ======================================================
-    # SELECT BEST MOVE
-    # ======================================================
-
-    best_move, best_child = (
-
-        mcts.select_action(
-            root
-        )
-
-    )
-
-
-    print(
-        "\nSelected move:",
-        best_move
-    )
-
-    print(
-        "Visits:",
-        best_child.visit_count
-    )
-
-    print(
-        "Value:",
-        round(
-            best_child.value,
-            4
-        )
-    )
-
-    print(
-        "Prior:",
-        round(
-            best_child.prior,
-            4
-        )
-    )
+print(
+    "for your existing RL pipeline."
+)
