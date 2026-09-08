@@ -536,22 +536,15 @@ class MCTS:
     ):
 
         if not roots:
-
             return
 
         if num_simulations <= 0:
-
             return
 
         if batch_size <= 0:
-
             raise ValueError(
                 "batch_size must be greater than 0."
             )
-
-        # --------------------------------------------------
-        # Remove invalid roots.
-        # --------------------------------------------------
 
         active_roots = [
             root
@@ -560,41 +553,47 @@ class MCTS:
         ]
 
         if not active_roots:
-
             return
 
         # --------------------------------------------------
-        # Batch root initialization.
+        # Remember the root visit count BEFORE this search.
+        #
+        # Root expansion itself must NOT count as a
+        # simulation.
+        # --------------------------------------------------
+
+        starting_visits = {
+            id(root): root.visit_count
+            for root in active_roots
+        }
+
+        # --------------------------------------------------
+        # Batch root expansion.
         # --------------------------------------------------
 
         self._expand_roots_batched(
             active_roots
         )
 
-        # --------------------------------------------------
-        # Track simulations separately for every game.
-        # --------------------------------------------------
-
-        simulations_done = {
-            id(root): 0
-            for root in active_roots
-        }
-
         # ==================================================
-        # MULTI-GAME BATCH LOOP
+        # BATCH LOOP
         # ==================================================
 
         while True:
 
-            unfinished_roots = [
-                root
-                for root in active_roots
-                if simulations_done[id(root)]
-                < num_simulations
-            ]
+            unfinished_roots = []
+
+            for root in active_roots:
+
+                completed = (
+                    root.visit_count
+                    - starting_visits[id(root)]
+                )
+
+                if completed < num_simulations:
+                    unfinished_roots.append(root)
 
             if not unfinished_roots:
-
                 break
 
             leaves = []
@@ -607,12 +606,14 @@ class MCTS:
             }
 
             # --------------------------------------------------
-            # Fill one combined batch from multiple games.
+            # Fill one global batch from all games.
             # --------------------------------------------------
+
+            made_progress = True
 
             while (
                 len(leaves) < batch_size
-                and unfinished_roots
+                and made_progress
             ):
 
                 made_progress = False
@@ -622,73 +623,48 @@ class MCTS:
                 ):
 
                     if len(leaves) >= batch_size:
-
                         break
 
-                    root_id = id(root)
+                    completed = (
+                        root.visit_count
+                        - starting_visits[id(root)]
+                    )
 
-                    if (
-                        simulations_done[root_id]
-                        >= num_simulations
-                    ):
-
-                        unfinished_roots.remove(
-                            root
-                        )
-
+                    if completed >= num_simulations:
                         continue
 
                     leaf, path = (
                         self._select_leaf_for_batch(
                             root,
-                            reserved_by_root[root_id]
+                            reserved_by_root[id(root)]
                         )
                     )
 
                     if leaf is None:
-
-                        simulations_done[root_id] = (
-                            num_simulations
-                        )
-
-                        unfinished_roots.remove(
-                            root
-                        )
-
                         continue
 
-                    for node in path:
+                    # --------------------------------------------------
+                    # Reserve this path with virtual visits.
+                    # --------------------------------------------------
 
+                    for node in path:
                         node.virtual_visit_count += 1
 
-                    leaves.append(
-                        leaf
-                    )
+                    leaves.append(leaf)
+                    paths.append(path)
+                    leaf_roots.append(root)
 
-                    paths.append(
-                        path
-                    )
-
-                    leaf_roots.append(
-                        root
-                    )
-
-                    reserved_by_root[root_id].add(
-                        id(leaf)
-                    )
+                    reserved_by_root[
+                        id(root)
+                    ].add(id(leaf))
 
                     made_progress = True
 
-                if not made_progress:
-
-                    break
-
             if not leaves:
-
                 break
 
             # ==================================================
-            # TERMINAL / NON-TERMINAL SPLIT
+            # TERMINAL / NON-TERMINAL
             # ==================================================
 
             non_terminal_indices = []
@@ -704,9 +680,7 @@ class MCTS:
                         leaf
                     )
 
-                    leaf.backup(
-                        value
-                    )
+                    leaf.backup(value)
 
                 else:
 
@@ -719,7 +693,7 @@ class MCTS:
                     )
 
             # ==================================================
-            # ONE COMBINED GPU EVALUATION
+            # ONE GPU BATCH
             # ==================================================
 
             if non_terminal_leaves:
@@ -732,10 +706,6 @@ class MCTS:
                         ]
                     )
                 )
-
-                # --------------------------------------------------
-                # Expand + backup.
-                # --------------------------------------------------
 
                 for batch_index, original_index in enumerate(
                     non_terminal_indices
@@ -762,18 +732,7 @@ class MCTS:
                         batch_index
                     ].item()
 
-                    leaf.backup(
-                        value
-                    )
-
-            # --------------------------------------------------
-            # Every selected leaf represents one actual
-            # simulation for its corresponding game.
-            # --------------------------------------------------
-
-            for root in leaf_roots:
-
-                simulations_done[id(root)] += 1
+                    leaf.backup(value)
 
     # ==================================================
     # SELECT ACTION
