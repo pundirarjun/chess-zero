@@ -1,6 +1,4 @@
-from training.self_play import play_game
-
-from training.replay_buffer import ReplayBuffer
+from training.self_play import play_games
 
 from training.train_step import train_from_replay_buffer
 
@@ -36,47 +34,54 @@ def run_training_iteration(
         "\nGenerating self-play games..."
     )
 
+    # --------------------------------------------------
+    # Generate all games together.
+    #
+    # This uses multi-game batched MCTS so neural-network
+    # evaluations from different games can share GPU
+    # batches.
+    # --------------------------------------------------
+
+    results = play_games(
+
+        model=model,
+
+        num_games=num_games,
+
+        num_simulations=num_simulations,
+
+        max_moves=max_moves,
+
+        temperature=temperature,
+
+        temperature_moves=temperature_moves,
+
+        dirichlet_alpha=dirichlet_alpha,
+
+        dirichlet_epsilon=dirichlet_epsilon,
+
+        batch_size=mcts_batch_size
+
+    )
+
+    # ==================================================
+    # PROCESS SELF-PLAY RESULTS
+    # ==================================================
+
     completed_games = 0
     truncated_games = 0
 
     total_samples_added = 0
 
-    # --------------------------------------------------
-    # Generate games
-    # --------------------------------------------------
-
-    for game_number in range(
-        num_games
+    for game_number, game_result in enumerate(
+        results
     ):
 
-        print(
-            f"\nGame {game_number + 1}/{num_games}"
-        )
-
-        game_result = play_game(
-
-            model=model,
-
-            num_simulations=num_simulations,
-
-            max_moves=max_moves,
-
-            temperature=temperature,
-
-            temperature_moves=temperature_moves,
-
-            dirichlet_alpha=dirichlet_alpha,
-
-            dirichlet_epsilon=dirichlet_epsilon,
-
-            batch_size=mcts_batch_size
-        )
-
-        # --------------------------------------------------
-        # Training samples
-        # --------------------------------------------------
-
         samples = game_result.training_data
+
+        # --------------------------------------------------
+        # Game statistics
+        # --------------------------------------------------
 
         if game_result.completed:
 
@@ -100,9 +105,9 @@ def run_training_iteration(
                 samples
             )
 
-        # --------------------------------------------------
-        # Game statistics
-        # --------------------------------------------------
+        print(
+            f"\nGame {game_number + 1}/{num_games}"
+        )
 
         print(
             "Samples:",
@@ -198,10 +203,6 @@ def run_training_iteration(
     print(
         "\n========== TRAINING RESULTS =========="
     )
-
-    # --------------------------------------------------
-    # Safely determine number of recorded steps
-    # --------------------------------------------------
 
     recorded_steps = len(
         losses["total_loss"]
