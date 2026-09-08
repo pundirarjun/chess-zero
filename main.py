@@ -44,16 +44,13 @@ PGN_PATH = (
     "lichess_2013_01.pgn"
 )
 
-# Start with 1,000 games for the first serious run.
-# Increase later after confirming everything works.
-NUM_GAMES = 1000
-
+NUM_GAMES = 5000
 
 # ----------------------------------------------------------
 # TRAINING
 # ----------------------------------------------------------
 
-EPOCHS = 5
+EPOCHS = 3
 
 BATCH_SIZE = 128
 
