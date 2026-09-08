@@ -158,7 +158,7 @@ def play_game(
 
     dirichlet_epsilon=0.25,
 
-    batch_size=64
+    batch_size=128
 
 ):
 
