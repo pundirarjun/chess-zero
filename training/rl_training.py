@@ -13,11 +13,10 @@ from training.checkpoint import load_checkpoint
 # CONFIGURATION
 # ==========================================================
 
-# Start RL from your pretrained model.
-# Change this to the latest RL checkpoint for later iterations.
+# Start RL from the new Phase 1 pretrained model.
 PREVIOUS_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/"
-    "checkpoints/pretrained_1000_games.pt"
+    "checkpoints/pretrained_phase1.pt"
 )
 
 OUTPUT_CHECKPOINT = (
@@ -34,12 +33,19 @@ REPLAY_BUFFER_CHECKPOINT = (
 # ==========================================================
 
 NUM_SELF_PLAY_GAMES = 10
+
 NUM_SIMULATIONS = 50
+
 MAX_MOVES = 300
+
 MCTS_BATCH_SIZE = 64
+
 TEMPERATURE = 1.0
+
 TEMPERATURE_MOVES = 40
+
 DIRICHLET_ALPHA = 0.3
+
 DIRICHLET_EPSILON = 0.25
 
 
@@ -55,7 +61,9 @@ REPLAY_BUFFER_CAPACITY = 10000
 # ==========================================================
 
 TRAINING_BATCH_SIZE = 32
-TRAINING_STEPS = 10 
+
+TRAINING_STEPS = 10
+
 LEARNING_RATE = 1e-4
 
 
@@ -207,12 +215,15 @@ def generate_self_play_data(
             )
 
         if result.result == 1:
+
             white_wins += 1
 
         elif result.result == -1:
+
             black_wins += 1
 
         elif result.result == 0:
+
             draws += 1
 
         print(
@@ -387,14 +398,18 @@ def train_model(
 
         states = torch.stack(
             [
-                torch.from_numpy(sample[0]).float()
+                torch.from_numpy(
+                    sample[0]
+                ).float()
                 for sample in batch_samples
             ]
         ).to(device)
 
         policies = torch.stack(
             [
-                torch.from_numpy(sample[1]).float()
+                torch.from_numpy(
+                    sample[1]
+                ).float()
                 for sample in batch_samples
             ]
         ).to(device)
@@ -592,7 +607,7 @@ def main():
         raise FileNotFoundError(
             f"Starting checkpoint not found: "
             f"{PREVIOUS_CHECKPOINT}\n"
-            f"Run PGN pretraining first."
+            f"Run Phase 1 pretraining first."
         )
 
     # ------------------------------------------------------
@@ -615,15 +630,22 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Load model + optimizer
+    # Load Phase 1 model + optimizer
     # ------------------------------------------------------
 
-    checkpoint = load_checkpoint(
+    previous_iteration = load_checkpoint(
         model=model,
         optimizer=optimizer,
-        path=PREVIOUS_CHECKPOINT,
-        device=device
+        path=PREVIOUS_CHECKPOINT
     )
+
+    # ------------------------------------------------------
+    # Make sure RL uses the RL learning rate
+    # ------------------------------------------------------
+
+    for param_group in optimizer.param_groups:
+
+        param_group["lr"] = LEARNING_RATE
 
     print(
         "Loaded checkpoint:",
@@ -632,10 +654,12 @@ def main():
 
     print(
         "Previous iteration:",
-        checkpoint.get(
-            "iteration",
-            "unknown"
-        )
+        previous_iteration
+    )
+
+    print(
+        "RL learning rate:",
+        LEARNING_RATE
     )
 
     # ------------------------------------------------------
