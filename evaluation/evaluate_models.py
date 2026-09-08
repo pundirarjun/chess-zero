@@ -33,17 +33,12 @@ from mcts.mcts import MCTS
 # CONFIGURATION
 # ==========================================================
 
-# Number of evaluation games
 NUM_GAMES = 10
 
-# MCTS simulations per move
 NUM_SIMULATIONS = 100
 
-# Maximum number of plies per game
 MAX_MOVES = 300
 
-# Evaluation temperature
-# 0.0 = deterministic highest-visit-count move
 EVALUATION_TEMPERATURE = 0.0
 
 
@@ -59,11 +54,15 @@ DEVICE = torch.device(
 
 
 # ==========================================================
-# CHECKPOINT
+# CHECKPOINTS
 # ==========================================================
 
 PRETRAINED_CHECKPOINT = (
     "checkpoints/pretrained_phase1.pt"
+)
+
+RL_CHECKPOINT = (
+    "checkpoints/rl_iteration_1.pt"
 )
 
 
@@ -94,7 +93,7 @@ def create_model():
 
 
 # ==========================================================
-# LOAD MODEL CHECKPOINT
+# LOAD MODEL
 # ==========================================================
 
 def load_model(
@@ -125,14 +124,15 @@ def load_model(
 
 
 # ==========================================================
-# CREATE MODEL
+# CREATE MODELS
 # ==========================================================
 
 pretrained_model = create_model()
+rl_model = create_model()
 
 
 # ==========================================================
-# LOAD PHASE 1 PRETRAINED MODEL
+# LOAD PHASE 1 MODEL
 # ==========================================================
 
 pretrained_checkpoint = load_model(
@@ -151,31 +151,49 @@ print(
 
 
 # ==========================================================
+# LOAD RL ITERATION 1 MODEL
+# ==========================================================
+
+rl_checkpoint = load_model(
+    rl_model,
+    RL_CHECKPOINT
+)
+
+print(
+    "\nLoaded RL Iteration 1 model."
+)
+
+print(
+    "Checkpoint:",
+    RL_CHECKPOINT
+)
+
+
+# ==========================================================
 # CHECKPOINT INFORMATION
 # ==========================================================
 
-print("\nCheckpoint information:")
+print("\nRL checkpoint information:")
 
 for key in [
     "iteration",
-    "epoch",
-    "num_games",
-    "num_samples"
+    "previous_checkpoint",
+    "completed_games",
+    "incomplete_games",
+    "white_wins",
+    "black_wins",
+    "draws",
+    "new_samples",
+    "num_simulations",
+    "training_steps"
 ]:
 
-    if key in pretrained_checkpoint:
+    if key in rl_checkpoint:
 
         print(
             f"{key}:",
-            pretrained_checkpoint[key]
+            rl_checkpoint[key]
         )
-
-
-# ==========================================================
-# ENSURE EVAL MODE
-# ==========================================================
-
-pretrained_model.eval()
 
 
 # ==========================================================
@@ -187,33 +205,17 @@ def get_move(
     board
 ):
 
-    # ------------------------------------------------------
-    # Create MCTS
-    # ------------------------------------------------------
-
     mcts = MCTS(
         model=model,
         action_encoder=action_encoder
     )
 
-    # ------------------------------------------------------
-    # Create fresh root
-    # ------------------------------------------------------
-
     root = Node(board)
-
-    # ------------------------------------------------------
-    # Run exactly NUM_SIMULATIONS simulations
-    # ------------------------------------------------------
 
     mcts.search(
         root,
         num_simulations=NUM_SIMULATIONS
     )
-
-    # ------------------------------------------------------
-    # Safety check
-    # ------------------------------------------------------
 
     if not root.children:
 
@@ -238,7 +240,7 @@ def get_move(
         return move
 
     # ------------------------------------------------------
-    # Optional stochastic evaluation
+    # Stochastic evaluation
     # ------------------------------------------------------
 
     return mcts.select_action_with_temperature(
@@ -257,6 +259,7 @@ def play_game(
 ):
 
     board = chess.Board()
+
     moves = 0
 
     while not board.is_game_over(
@@ -264,7 +267,7 @@ def play_game(
     ):
 
         # --------------------------------------------------
-        # Safety limit
+        # Maximum move safety limit
         # --------------------------------------------------
 
         if moves >= MAX_MOVES:
@@ -288,7 +291,7 @@ def play_game(
             model = black_model
 
         # --------------------------------------------------
-        # Get MCTS move
+        # Get move
         # --------------------------------------------------
 
         move = get_move(
@@ -305,10 +308,6 @@ def play_game(
             raise RuntimeError(
                 f"Illegal move returned by MCTS: {move}"
             )
-
-        # --------------------------------------------------
-        # Play move
-        # --------------------------------------------------
 
         board.push(move)
 
@@ -372,6 +371,7 @@ def evaluate_models(
     truncated = 0
 
     termination_counts = {}
+
     total_moves = 0
 
     # ======================================================
@@ -390,8 +390,15 @@ def evaluate_models(
         "=============================="
     )
 
-    print("Games:", NUM_GAMES)
-    print("MCTS simulations:", NUM_SIMULATIONS)
+    print(
+        "Games:",
+        NUM_GAMES
+    )
+
+    print(
+        "MCTS simulations:",
+        NUM_SIMULATIONS
+    )
 
     print(
         "Evaluation temperature:",
@@ -399,7 +406,7 @@ def evaluate_models(
     )
 
     # ======================================================
-    # GAMES
+    # PLAY GAMES
     # ======================================================
 
     for game_number in range(
@@ -415,12 +422,14 @@ def evaluate_models(
 
             white_model = model_a
             black_model = model_b
+
             a_color = "White"
 
         else:
 
             white_model = model_b
             black_model = model_a
+
             a_color = "Black"
 
         print(
@@ -432,7 +441,7 @@ def evaluate_models(
         )
 
         # --------------------------------------------------
-        # Play game
+        # Play
         # --------------------------------------------------
 
         result = play_game(
@@ -458,7 +467,7 @@ def evaluate_models(
         total_moves += result["moves"]
 
         # ==================================================
-        # SCORE RESULT
+        # SCORE
         # ==================================================
 
         if result["result"] is None:
@@ -488,7 +497,7 @@ def evaluate_models(
             b_wins += 1
 
         # ==================================================
-        # TERMINATION COUNT
+        # TERMINATION
         # ==================================================
 
         termination = result["termination"]
@@ -551,6 +560,11 @@ def evaluate_models(
         + true_draws
     )
 
+    print(
+        "\nCompleted games:",
+        completed_games
+    )
+
     # ======================================================
     # SCORE
     # ======================================================
@@ -573,11 +587,6 @@ def evaluate_models(
         b_score = 0.0
 
     print(
-        "\nCompleted games:",
-        completed_games
-    )
-
-    print(
         "Score among completed games:"
     )
 
@@ -593,15 +602,11 @@ def evaluate_models(
     # TRUNCATION RATE
     # ======================================================
 
-    if NUM_GAMES > 0:
-
-        truncation_rate = (
-            truncated / NUM_GAMES
-        )
-
-    else:
-
-        truncation_rate = 0.0
+    truncation_rate = (
+        truncated / NUM_GAMES
+        if NUM_GAMES > 0
+        else 0.0
+    )
 
     print(
         "\nTruncation rate:",
@@ -662,7 +667,7 @@ if __name__ == "__main__":
 
     evaluate_models(
         pretrained_model,
-        pretrained_model,
-        "Phase 1 Pretrained A",
-        "Phase 1 Pretrained B"
+        rl_model,
+        "Phase 1 Pretrained",
+        "RL Iteration 1"
     )

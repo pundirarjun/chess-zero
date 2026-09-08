@@ -248,25 +248,7 @@ def generate_self_play_data(
             0
         ) + 1
 
-        print(
-            "Completed:",
-            result.completed
-        )
-
-        print(
-            "Result:",
-            result.result
-        )
-
-        print(
-            "Termination:",
-            result.termination
-        )
-
-        print(
-            "Moves:",
-            result.moves_played
-        )
+        
 
         # --------------------------------------------------
         # Discard incomplete games
@@ -314,10 +296,7 @@ def generate_self_play_data(
 
             draws += 1
 
-        print(
-            "Training samples added:",
-            len(result.training_data)
-        )
+        
 
     # ======================================================
     # SUMMARY
