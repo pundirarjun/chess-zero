@@ -32,19 +32,19 @@ from training.trainer import train_one_batch
 # CONFIGURATION
 # ==========================================================
 
-# Phase 1 pretrained model
+# RL Iteration 1 model
 PREVIOUS_CHECKPOINT = (
-    "checkpoints/pretrained_phase1.pt"
-)
-
-# RL output
-OUTPUT_CHECKPOINT = (
     "checkpoints/rl_iteration_1.pt"
 )
 
-# Replay buffer output
+# RL Iteration 2 output
+OUTPUT_CHECKPOINT = (
+    "checkpoints/rl_iteration_2.pt"
+)
+
+# RL Iteration 2 replay buffer
 REPLAY_BUFFER_CHECKPOINT = (
-    "checkpoints/replay_buffer_rl1.pt"
+    "checkpoints/replay_buffer_rl2.pt"
 )
 
 
@@ -52,9 +52,9 @@ REPLAY_BUFFER_CHECKPOINT = (
 # SELF-PLAY CONFIGURATION
 # ==========================================================
 
-NUM_SELF_PLAY_GAMES = 10
+NUM_SELF_PLAY_GAMES = 100
 
-NUM_SIMULATIONS = 50
+NUM_SIMULATIONS = 100
 
 MAX_MOVES = 300
 
@@ -73,7 +73,7 @@ DIRICHLET_EPSILON = 0.25
 # REPLAY BUFFER
 # ==========================================================
 
-REPLAY_BUFFER_CAPACITY = 10000
+REPLAY_BUFFER_CAPACITY = 50000
 
 
 # ==========================================================
@@ -82,7 +82,7 @@ REPLAY_BUFFER_CAPACITY = 10000
 
 TRAINING_BATCH_SIZE = 32
 
-TRAINING_STEPS = 10
+TRAINING_STEPS = 200
 
 LEARNING_RATE = 1e-4
 
@@ -91,7 +91,7 @@ LEARNING_RATE = 1e-4
 # ITERATION
 # ==========================================================
 
-ITERATION = 1
+ITERATION = 2
 
 
 # ==========================================================
@@ -135,10 +135,10 @@ def create_optimizer(model):
 
 
 # ==========================================================
-# LOAD PHASE 1 CHECKPOINT
+# LOAD PREVIOUS RL CHECKPOINT
 # ==========================================================
 
-def load_phase1_checkpoint(
+def load_previous_checkpoint(
     model,
     optimizer,
     checkpoint_path
@@ -149,12 +149,8 @@ def load_phase1_checkpoint(
         raise FileNotFoundError(
             f"Starting checkpoint not found: "
             f"{checkpoint_path}\n"
-            f"Run Phase 1 pretraining first."
+            f"Run RL Iteration 1 first."
         )
-
-    # ------------------------------------------------------
-    # Load checkpoint silently
-    # ------------------------------------------------------
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -162,27 +158,15 @@ def load_phase1_checkpoint(
         weights_only=False
     )
 
-    # ------------------------------------------------------
-    # Load model weights
-    # ------------------------------------------------------
-
     model.load_state_dict(
         checkpoint["model_state_dict"]
     )
 
-    # ------------------------------------------------------
-    # Do NOT restore the Phase 1 optimizer state.
-    #
-    # RL should start with a fresh optimizer using the
-    # RL learning rate.
-    # ------------------------------------------------------
-
+    # RL starts with a fresh optimizer.
     for param_group in optimizer.param_groups:
-
         param_group["lr"] = LEARNING_RATE
 
     model.to(device)
-
     model.train()
 
     return checkpoint
@@ -248,8 +232,6 @@ def generate_self_play_data(
             0
         ) + 1
 
-        
-
         # --------------------------------------------------
         # Discard incomplete games
         # --------------------------------------------------
@@ -295,8 +277,6 @@ def generate_self_play_data(
         elif result.result == 0:
 
             draws += 1
-
-        
 
     # ======================================================
     # SUMMARY
@@ -653,6 +633,11 @@ def main():
     )
 
     print(
+        "Iteration:",
+        ITERATION
+    )
+
+    print(
         "Device:",
         device
     )
@@ -687,27 +672,27 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Load Phase 1 model
+    # Load RL1 model
     # ------------------------------------------------------
 
-    checkpoint = load_phase1_checkpoint(
+    checkpoint = load_previous_checkpoint(
         model=model,
         optimizer=optimizer,
         checkpoint_path=PREVIOUS_CHECKPOINT
     )
 
     print(
-        "\nLoaded Phase 1 checkpoint."
+        "\nLoaded previous RL checkpoint."
     )
-
-    # Print only metadata.
-    # NEVER print model/state_dict/weights.
 
     for key in [
         "iteration",
-        "epoch",
-        "num_games",
-        "num_samples"
+        "completed_games",
+        "incomplete_games",
+        "white_wins",
+        "black_wins",
+        "draws",
+        "new_samples"
     ]:
 
         if key in checkpoint:
