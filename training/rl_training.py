@@ -1,6 +1,11 @@
 import os
-import torch
 import sys
+import torch
+
+
+# ==========================================================
+# MAKE PROJECT ROOT IMPORTABLE
+# ==========================================================
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(
@@ -11,32 +16,33 @@ PROJECT_ROOT = os.path.dirname(
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import torch
 
-from model.chess_net import ChessNet
-
+# ==========================================================
+# IMPORTS
+# ==========================================================
 
 from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
 from training.self_play import play_game
 from training.replay_buffer import ReplayBuffer
 from training.trainer import train_one_batch
-from training.checkpoint import load_checkpoint
 
 
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
 
-# Start RL from the new Phase 1 pretrained model.
+# Phase 1 pretrained model
 PREVIOUS_CHECKPOINT = (
     "checkpoints/pretrained_phase1.pt"
 )
 
+# RL output
 OUTPUT_CHECKPOINT = (
     "checkpoints/rl_iteration_1.pt"
 )
 
+# Replay buffer output
 REPLAY_BUFFER_CHECKPOINT = (
     "checkpoints/replay_buffer_rl1.pt"
 )
@@ -129,6 +135,60 @@ def create_optimizer(model):
 
 
 # ==========================================================
+# LOAD PHASE 1 CHECKPOINT
+# ==========================================================
+
+def load_phase1_checkpoint(
+    model,
+    optimizer,
+    checkpoint_path
+):
+
+    if not os.path.exists(checkpoint_path):
+
+        raise FileNotFoundError(
+            f"Starting checkpoint not found: "
+            f"{checkpoint_path}\n"
+            f"Run Phase 1 pretraining first."
+        )
+
+    # ------------------------------------------------------
+    # Load checkpoint silently
+    # ------------------------------------------------------
+
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=False
+    )
+
+    # ------------------------------------------------------
+    # Load model weights
+    # ------------------------------------------------------
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
+
+    # ------------------------------------------------------
+    # Do NOT restore the Phase 1 optimizer state.
+    #
+    # RL should start with a fresh optimizer using the
+    # RL learning rate.
+    # ------------------------------------------------------
+
+    for param_group in optimizer.param_groups:
+
+        param_group["lr"] = LEARNING_RATE
+
+    model.to(device)
+
+    model.train()
+
+    return checkpoint
+
+
+# ==========================================================
 # GENERATE SELF-PLAY DATA
 # ==========================================================
 
@@ -151,9 +211,11 @@ def generate_self_play_data(
 
     completed_games = 0
     incomplete_games = 0
+
     white_wins = 0
     black_wins = 0
     draws = 0
+
     new_samples = 0
 
     termination_counts = {}
@@ -206,6 +268,10 @@ def generate_self_play_data(
             result.moves_played
         )
 
+        # --------------------------------------------------
+        # Discard incomplete games
+        # --------------------------------------------------
+
         if not result.completed:
 
             incomplete_games += 1
@@ -218,6 +284,10 @@ def generate_self_play_data(
 
         completed_games += 1
 
+        # --------------------------------------------------
+        # Add training data
+        # --------------------------------------------------
+
         if result.training_data:
 
             replay_buffer.add(
@@ -227,6 +297,10 @@ def generate_self_play_data(
             new_samples += len(
                 result.training_data
             )
+
+        # --------------------------------------------------
+        # Result statistics
+        # --------------------------------------------------
 
         if result.result == 1:
 
@@ -244,6 +318,10 @@ def generate_self_play_data(
             "Training samples added:",
             len(result.training_data)
         )
+
+    # ======================================================
+    # SUMMARY
+    # ======================================================
 
     print(
         "\n=============================="
@@ -611,21 +689,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Check starting checkpoint
-    # ------------------------------------------------------
-
-    if not os.path.exists(
-        PREVIOUS_CHECKPOINT
-    ):
-
-        raise FileNotFoundError(
-            f"Starting checkpoint not found: "
-            f"{PREVIOUS_CHECKPOINT}\n"
-            f"Run Phase 1 pretraining first."
-        )
-
-    # ------------------------------------------------------
-    # Model
+    # Create model
     # ------------------------------------------------------
 
     model, action_encoder = create_model()
@@ -636,7 +700,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Optimizer
+    # Create fresh RL optimizer
     # ------------------------------------------------------
 
     optimizer = create_optimizer(
@@ -644,32 +708,35 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Load Phase 1 model + optimizer
+    # Load Phase 1 model
     # ------------------------------------------------------
 
-    previous_iteration = load_checkpoint(
+    checkpoint = load_phase1_checkpoint(
         model=model,
         optimizer=optimizer,
-        path=PREVIOUS_CHECKPOINT
-    )
-
-    # ------------------------------------------------------
-    # Make sure RL uses the RL learning rate
-    # ------------------------------------------------------
-
-    for param_group in optimizer.param_groups:
-
-        param_group["lr"] = LEARNING_RATE
-
-    print(
-        "Loaded checkpoint:",
-        PREVIOUS_CHECKPOINT
+        checkpoint_path=PREVIOUS_CHECKPOINT
     )
 
     print(
-        "Previous iteration:",
-        previous_iteration
+        "\nLoaded Phase 1 checkpoint."
     )
+
+    # Print only metadata.
+    # NEVER print model/state_dict/weights.
+
+    for key in [
+        "iteration",
+        "epoch",
+        "num_games",
+        "num_samples"
+    ]:
+
+        if key in checkpoint:
+
+            print(
+                f"{key}:",
+                checkpoint[key]
+            )
 
     print(
         "RL learning rate:",
@@ -719,7 +786,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Train
+    # RL training
     # ------------------------------------------------------
 
     training_stats = train_model(
@@ -729,7 +796,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Save model
+    # Save RL checkpoint
     # ------------------------------------------------------
 
     save_rl_checkpoint(
@@ -738,6 +805,10 @@ def main():
         self_play_stats=self_play_stats,
         training_stats=training_stats
     )
+
+    # ------------------------------------------------------
+    # Finished
+    # ------------------------------------------------------
 
     print(
         "\n=========================================="
