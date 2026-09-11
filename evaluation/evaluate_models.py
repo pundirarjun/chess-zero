@@ -1,16 +1,3 @@
-"""
-GPU-batched model evaluation.
-
-Phase 1 / RL models are evaluated through the tensorized GPU chess engine
-and GPU MCTS.
-
-Unlike the old evaluation implementation, games are advanced in parallel.
-At every move, positions belonging to the same model are grouped into one
-GPUMCTS batch.
-
-No python-chess or Python Node MCTS is used in the evaluation hot path.
-"""
-
 from __future__ import annotations
 
 import os
@@ -75,9 +62,11 @@ DEVICE = torch.device(
 # ==========================================================
 
 PRETRAINED_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/"
-    "checkpoints/pretrained_phase1.pt"
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_2.pt"
 )
+
+
+
 
 RL_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/"
@@ -1310,7 +1299,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded Phase 1 checkpoint:"
+        "Loaded RL2 Checkpoint:"
     )
 
     print(
@@ -1319,7 +1308,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL checkpoint:"
+        "Loaded RL1 checkpoint:"
     )
 
     print(
@@ -1333,6 +1322,6 @@ if __name__ == "__main__":
     evaluate_models(
         pretrained,
         rl,
-        "Phase 1 Pretrained",
+        "RL iteration 2",
         "RL Iteration 1"
     )
