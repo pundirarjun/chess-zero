@@ -62,7 +62,7 @@ DEVICE = torch.device(
 # ==========================================================
 
 PRETRAINED_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_2.pt"
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_3.pt"
 )
 
 
@@ -70,7 +70,7 @@ PRETRAINED_CHECKPOINT = (
 
 RL_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/"
-    "checkpoints/rl_iteration_1.pt"
+    "checkpoints/rl_iteration_2.pt"
 )
 
 
@@ -1299,7 +1299,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL2 Checkpoint:"
+        "Loaded RL3 Checkpoint:"
     )
 
     print(
@@ -1308,7 +1308,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL1 checkpoint:"
+        "Loaded RL2 checkpoint:"
     )
 
     print(
@@ -1322,6 +1322,6 @@ if __name__ == "__main__":
     evaluate_models(
         pretrained,
         rl,
-        "RL iteration 2",
-        "RL Iteration 1"
+        "RL iteration 3",
+        "RL Iteration 2"
     )
