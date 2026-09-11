@@ -1,96 +1,35 @@
+"""GPU-efficient replay-buffer training."""
+
+from __future__ import annotations
+
+import numpy as np
 import torch
 
-from training.dataset import ChessDataset
 from training.trainer import train_one_batch
 
 
-def train_from_replay_buffer(
-    model,
-    optimizer,
-    replay_buffer,
-    batch_size=32,
-    training_steps=10
-):
-
-    if batch_size <= 0:
-        raise ValueError(
-            "batch_size must be greater than 0."
-        )
-
-    if training_steps <= 0:
-        raise ValueError(
-            "training_steps must be greater than 0."
-        )
-
+def train_from_replay_buffer(model, optimizer, replay_buffer, batch_size=32, training_steps=10):
+    if batch_size <= 0 or training_steps <= 0:
+        raise ValueError("batch_size and training_steps must be greater than zero")
     if len(replay_buffer) < batch_size:
-        raise ValueError(
-            f"Replay buffer contains "
-            f"{len(replay_buffer)} samples, "
-            f"but batch size is {batch_size}."
-        )
+        raise ValueError(f"Replay buffer contains {len(replay_buffer)} samples, but batch size is {batch_size}.")
 
-    total_losses = []
-    policy_losses = []
-    value_losses = []
+    device = next(model.parameters()).device
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+    total_losses, policy_losses, value_losses = [], [], []
 
-    for step in range(training_steps):
+    for _ in range(training_steps):
+        samples = replay_buffer.sample(batch_size)
+        states = torch.from_numpy(np.asarray([s[0] for s in samples], dtype=np.float32))
+        policies = torch.from_numpy(np.asarray([s[1] for s in samples], dtype=np.float32))
+        values = torch.from_numpy(np.asarray([s[2] for s in samples], dtype=np.float32))
+        if device.type == "cuda":
+            states = states.pin_memory().to(device, non_blocking=True).contiguous(memory_format=torch.channels_last)
+            policies = policies.pin_memory().to(device, non_blocking=True)
+            values = values.pin_memory().to(device, non_blocking=True)
+        else:
+            states, policies, values = states.to(device), policies.to(device), values.to(device)
+        tl, pl, vl = train_one_batch(model, optimizer, states, policies, values, scaler=scaler)
+        total_losses.append(tl); policy_losses.append(pl); value_losses.append(vl)
 
-        samples = replay_buffer.sample(
-            batch_size
-        )
-
-        dataset = ChessDataset(
-            samples
-        )
-
-        states = []
-        policies = []
-        values = []
-
-        for i in range(len(dataset)):
-
-            state, policy, value = dataset[i]
-
-            states.append(state)
-            policies.append(policy)
-            values.append(value)
-
-        states = torch.stack(
-            states
-        )
-
-        policies = torch.stack(
-            policies
-        )
-
-        values = torch.stack(
-            values
-        )
-
-        total_loss, policy_loss, value_loss = (
-            train_one_batch(
-                model=model,
-                optimizer=optimizer,
-                states=states,
-                target_policy=policies,
-                target_value=values
-            )
-        )
-
-        total_losses.append(
-            total_loss
-        )
-
-        policy_losses.append(
-            policy_loss
-        )
-
-        value_losses.append(
-            value_loss
-        )
-
-    return {
-        "total_loss": total_losses,
-        "policy_loss": policy_losses,
-        "value_loss": value_losses
-    }
+    return {"total_loss": total_losses, "policy_loss": policy_losses, "value_loss": value_losses}

@@ -1,0 +1,5 @@
+numpy>=1.24
+python-chess>=1.999
+zstandard>=0.22
+# Install the CUDA-enabled PyTorch build separately when your environment
+# does not already provide it. Kaggle GPU notebooks normally provide PyTorch.

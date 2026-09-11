@@ -1,164 +1,47 @@
+"""GPU-first supervised pretraining utilities."""
+
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 
 
-def pretrain_one_epoch(
-    model,
-    dataloader,
-    optimizer,
-    device="cpu"
-):
-
+def pretrain_one_epoch(model, dataloader, optimizer, device="cpu"):
+    device = torch.device(device)
     model.train()
-
-    total_loss = 0.0
-
-    total_policy_loss = 0.0
-
-    total_value_loss = 0.0
-
+    scaler = torch.amp.GradScaler("cuda") if device.type == "cuda" else None
+    totals = [0.0, 0.0, 0.0]
     batches = 0
 
-    # ======================================================
-    # TRAINING LOOP
-    # ======================================================
-
-    for states, policies, values in dataloader:
-
-        # --------------------------------------------------
-        # Move data to device
-        # --------------------------------------------------
-
-        states = states.to(
-            device,
-            non_blocking=True
-        )
-
-        policies = policies.to(
-            device,
-            non_blocking=True
-        )
-
-        values = values.to(
-            device,
-            non_blocking=True
-        )
-
-        # --------------------------------------------------
-        # Reset gradients
-        # --------------------------------------------------
-
-        optimizer.zero_grad(
-            set_to_none=True
-        )
-
-        # --------------------------------------------------
-        # Forward pass
-        # --------------------------------------------------
-
-        policy_logits, value_pred = model(
-            states
-        )
-
-        # ==================================================
-        # POLICY LOSS
-        # ==================================================
-
-        # PGN policy targets are one-hot.
-
-        target_actions = policies.argmax(
-            dim=1
-        )
-
-        policy_loss = F.cross_entropy(
-            policy_logits,
-            target_actions
-        )
-
-        # ==================================================
-        # VALUE LOSS
-        # ==================================================
-
-        value_pred = value_pred.squeeze(
-            1
-        )
-
-        value_loss = F.mse_loss(
-            value_pred,
-            values
-        )
-
-        # ==================================================
-        # TOTAL LOSS
-        # ==================================================
-
-        loss = (
-            policy_loss
-            +
-            value_loss
-        )
-
-        # ==================================================
-        # BACKPROPAGATION
-        # ==================================================
-
-        loss.backward()
-
-        # --------------------------------------------------
-        # Gradient clipping
-        # --------------------------------------------------
-
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            max_norm=1.0
-        )
-
-        # --------------------------------------------------
-        # Optimizer step
-        # --------------------------------------------------
-
-        optimizer.step()
-
-        # ==================================================
-        # STATISTICS
-        # ==================================================
-
-        total_loss += (
-            loss.item()
-        )
-
-        total_policy_loss += (
-            policy_loss.item()
-        )
-
-        total_value_loss += (
-            value_loss.item()
-        )
-
+    for states, actions, values in dataloader:
+        states = states.to(device, non_blocking=device.type == "cuda")
+        actions = actions.to(device, non_blocking=device.type == "cuda")
+        values = values.to(device, non_blocking=device.type == "cuda")
+        if device.type == "cuda":
+            states = states.contiguous(memory_format=torch.channels_last)
+        optimizer.zero_grad(set_to_none=True)
+        if device.type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                logits, pred_value = model(states)
+                policy_loss = F.cross_entropy(logits, actions)
+                value_loss = F.mse_loss(pred_value.squeeze(-1), values)
+                loss = policy_loss + value_loss
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits, pred_value = model(states)
+            policy_loss = F.cross_entropy(logits, actions)
+            value_loss = F.mse_loss(pred_value.squeeze(-1), values)
+            loss = policy_loss + value_loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+        totals[0] += float(loss.item()); totals[1] += float(policy_loss.item()); totals[2] += float(value_loss.item())
         batches += 1
 
-    # ======================================================
-    # EMPTY DATALOADER CHECK
-    # ======================================================
-
     if batches == 0:
-
-        raise RuntimeError(
-            "Dataloader produced zero batches."
-        )
-
-    # ======================================================
-    # RETURN AVERAGES
-    # ======================================================
-
-    return {
-
-        "total_loss":
-            total_loss / batches,
-
-        "policy_loss":
-            total_policy_loss / batches,
-
-        "value_loss":
-            total_value_loss / batches
-    }
+        raise RuntimeError("Dataloader produced zero batches.")
+    return {"total_loss": totals[0] / batches, "policy_loss": totals[1] / batches, "value_loss": totals[2] / batches}
