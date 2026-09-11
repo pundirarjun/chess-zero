@@ -27,8 +27,8 @@ MAX_MOVES = 300
 EVALUATION_TEMPERATURE = 0.0
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PRETRAINED_CHECKPOINT = "/content/pretrained_phase1.pt"
-RL_CHECKPOINT = "/content/rl_iteration_1.pt"
+PRETRAINED_CHECKPOINT = "/kaggle/input/datasets/arjunthakur9999/checkpoints/pretrained_phase1.pt"
+RL_CHECKPOINT = "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_1.pt"
 
 ACTION_SPACE_SIZE = 4544
 
