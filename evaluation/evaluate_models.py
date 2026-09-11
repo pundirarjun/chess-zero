@@ -39,7 +39,7 @@ NUM_SIMULATIONS = 50
 
 MAX_MOVES = 300
 
-EVALUATION_TEMPERATURE = 0.0
+EVALUATION_TEMPERATURE = 0.25
 
 
 # ==========================================================
