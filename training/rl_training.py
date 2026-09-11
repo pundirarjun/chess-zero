@@ -44,9 +44,9 @@ OUTPUT_REPLAY_BUFFER = os.path.join(LOCAL_CHECKPOINT_ROOT, f"replay_buffer_rl{RL
 # ---------------------------------------------------------------------------
 # Self-play.  Increase games first to keep the GPU busy; then increase sims.
 # ---------------------------------------------------------------------------
-NUM_SELF_PLAY_GAMES = 32
-NUM_SIMULATIONS = 50
-MAX_MOVES = 300
+NUM_SELF_PLAY_GAMES = 3
+NUM_SIMULATIONS = 2
+MAX_MOVES = 10
 MCTS_BATCH_SIZE = 32  # API compatibility; GPU MCTS batches all active games.
 TEMPERATURE = 1.0
 TEMPERATURE_MOVES = 40
@@ -59,7 +59,7 @@ DIRICHLET_EPSILON = 0.25
 # ---------------------------------------------------------------------------
 REPLAY_BUFFER_CAPACITY = 50000
 TRAINING_BATCH_SIZE = 128
-TRAINING_STEPS = 100
+TRAINING_STEPS = 1
 LEARNING_RATE = 1e-4
 SEED = 42
 
