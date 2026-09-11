@@ -70,7 +70,7 @@ PRETRAINED_CHECKPOINT = (
 
 RL_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/"
-    "checkpoints/rl_iteration_2.pt"
+    "checkpoints/rl_iteration_1.pt"
 )
 
 
@@ -1308,7 +1308,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL2 checkpoint:"
+        "Loaded RL1 checkpoint:"
     )
 
     print(
@@ -1323,5 +1323,5 @@ if __name__ == "__main__":
         pretrained,
         rl,
         "RL iteration 3",
-        "RL Iteration 2"
+        "RL Iteration 1"
     )
