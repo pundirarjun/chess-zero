@@ -1,5 +1,6 @@
 import os
 import sys
+import numpy as np
 import torch
 
 
@@ -23,7 +24,7 @@ if PROJECT_ROOT not in sys.path:
 
 from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
-from training.self_play import play_game
+from training.self_play import play_games
 from training.replay_buffer import ReplayBuffer
 from training.trainer import train_one_batch
 
@@ -32,24 +33,44 @@ from training.trainer import train_one_batch
 # CONFIGURATION
 # ==========================================================
 
-# RL1 model
-PREVIOUS_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_1.pt"
+# ==========================================================
+# CHANGE ONLY THIS NUMBER FOR THE NEXT RL ITERATION.
+#
+# Example:
+#   RL_ITERATION = 2  -> loads RL1, saves RL2
+#   RL_ITERATION = 3  -> loads RL2, saves RL3
+# ==========================================================
+
+RL_ITERATION = 2
+
+PREVIOUS_ITERATION = RL_ITERATION - 1
+
+KAGGLE_CHECKPOINT_ROOT = (
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints"
 )
 
-# RL1 replay buffer
-PREVIOUS_REPLAY_BUFFER = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/replay_buffer_rl1.pt"
+LOCAL_CHECKPOINT_ROOT = (
+    "checkpoints"
 )
 
-# RL2 model output
-OUTPUT_CHECKPOINT = (
-    "checkpoints/rl_iteration_2.pt"
+PREVIOUS_CHECKPOINT = os.path.join(
+    KAGGLE_CHECKPOINT_ROOT,
+    f"rl_iteration_{PREVIOUS_ITERATION}.pt"
 )
 
-# RL2 replay buffer output
-OUTPUT_REPLAY_BUFFER = (
-    "checkpoints/replay_buffer_rl2.pt"
+PREVIOUS_REPLAY_BUFFER = os.path.join(
+    KAGGLE_CHECKPOINT_ROOT,
+    f"replay_buffer_rl{PREVIOUS_ITERATION}.pt"
+)
+
+OUTPUT_CHECKPOINT = os.path.join(
+    LOCAL_CHECKPOINT_ROOT,
+    f"rl_iteration_{RL_ITERATION}.pt"
+)
+
+OUTPUT_REPLAY_BUFFER = os.path.join(
+    LOCAL_CHECKPOINT_ROOT,
+    f"replay_buffer_rl{RL_ITERATION}.pt"
 )
 
 
@@ -58,20 +79,15 @@ OUTPUT_REPLAY_BUFFER = (
 # ==========================================================
 
 NUM_SELF_PLAY_GAMES = 10
-
 NUM_SIMULATIONS = 50
-
 MAX_MOVES = 300
 
-# Benchmark showed 128 as fastest.
+# Global neural-network batch size used by multi-game MCTS.
 MCTS_BATCH_SIZE = 128
 
 TEMPERATURE = 1.0
-
 TEMPERATURE_MOVES = 40
-
 DIRICHLET_ALPHA = 0.3
-
 DIRICHLET_EPSILON = 0.25
 
 
@@ -87,17 +103,8 @@ REPLAY_BUFFER_CAPACITY = 50000
 # ==========================================================
 
 TRAINING_BATCH_SIZE = 32
-
 TRAINING_STEPS = 50
-
 LEARNING_RATE = 1e-4
-
-
-# ==========================================================
-# ITERATION
-# ==========================================================
-
-ITERATION = 2
 
 
 # ==========================================================
@@ -109,6 +116,17 @@ device = torch.device(
     if torch.cuda.is_available()
     else "cpu"
 )
+
+if device.type == "cuda":
+    # Better convolution performance on NVIDIA GPUs.
+    torch.backends.cudnn.benchmark = True
+
+    # Safe TF32 acceleration for FP32 matrix/convolution operations.
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    # High-performance FP32 matmul selection.
+    torch.set_float32_matmul_precision("high")
 
 
 # ==========================================================
@@ -124,6 +142,11 @@ def create_model():
     )
 
     model.to(device)
+
+    if device.type == "cuda":
+        model.to(
+            memory_format=torch.channels_last
+        )
 
     return model, action_encoder
 
@@ -141,6 +164,20 @@ def create_optimizer(model):
 
 
 # ==========================================================
+# CREATE AMP SCALER
+# ==========================================================
+
+def create_scaler():
+
+    if device.type != "cuda":
+        return None
+
+    return torch.amp.GradScaler(
+        "cuda"
+    )
+
+
+# ==========================================================
 # LOAD PREVIOUS MODEL
 # ==========================================================
 
@@ -152,10 +189,19 @@ def load_previous_checkpoint(
 
     if not os.path.exists(checkpoint_path):
 
-        raise FileNotFoundError(
-            f"Starting checkpoint not found:\n"
-            f"{checkpoint_path}"
+        # Useful fallback when running outside Kaggle.
+        local_path = os.path.join(
+            LOCAL_CHECKPOINT_ROOT,
+            os.path.basename(checkpoint_path)
         )
+
+        if os.path.exists(local_path):
+            checkpoint_path = local_path
+        else:
+            raise FileNotFoundError(
+                f"Starting checkpoint not found:\n"
+                f"{checkpoint_path}"
+            )
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -172,6 +218,12 @@ def load_previous_checkpoint(
         param_group["lr"] = LEARNING_RATE
 
     model.to(device)
+
+    if device.type == "cuda":
+        model.to(
+            memory_format=torch.channels_last
+        )
+
     model.train()
 
     return checkpoint
@@ -187,10 +239,18 @@ def load_previous_replay_buffer(
 
     if not os.path.exists(path):
 
-        raise FileNotFoundError(
-            f"Previous replay buffer not found:\n"
-            f"{path}"
+        local_path = os.path.join(
+            LOCAL_CHECKPOINT_ROOT,
+            os.path.basename(path)
         )
+
+        if os.path.exists(local_path):
+            path = local_path
+        else:
+            raise FileNotFoundError(
+                f"Previous replay buffer not found:\n"
+                f"{path}"
+            )
 
     data = torch.load(
         path,
@@ -243,37 +303,34 @@ def generate_self_play_data(
         "=============================="
     )
 
+    # IMPORTANT:
+    # Generate all independent games together.
+    # self_play.play_games() combines their MCTS neural-network
+    # evaluations into shared GPU batches.
+    results = play_games(
+        model=model,
+        num_games=NUM_SELF_PLAY_GAMES,
+        num_simulations=NUM_SIMULATIONS,
+        max_moves=MAX_MOVES,
+        temperature=TEMPERATURE,
+        temperature_moves=TEMPERATURE_MOVES,
+        dirichlet_alpha=DIRICHLET_ALPHA,
+        dirichlet_epsilon=DIRICHLET_EPSILON,
+        batch_size=MCTS_BATCH_SIZE
+    )
+
     completed_games = 0
     incomplete_games = 0
-
     white_wins = 0
     black_wins = 0
     draws = 0
-
     new_samples = 0
-
     termination_counts = {}
 
-    for game_number in range(
-        1,
-        NUM_SELF_PLAY_GAMES + 1
+    for game_number, result in enumerate(
+        results,
+        start=1
     ):
-
-        print(
-            f"\n========== GAME "
-            f"{game_number}/{NUM_SELF_PLAY_GAMES} =========="
-        )
-
-        result = play_game(
-            model=model,
-            num_simulations=NUM_SIMULATIONS,
-            max_moves=MAX_MOVES,
-            temperature=TEMPERATURE,
-            temperature_moves=TEMPERATURE_MOVES,
-            dirichlet_alpha=DIRICHLET_ALPHA,
-            dirichlet_epsilon=DIRICHLET_EPSILON,
-            batch_size=MCTS_BATCH_SIZE
-        )
 
         termination_counts[
             result.termination
@@ -282,25 +339,18 @@ def generate_self_play_data(
             0
         ) + 1
 
-        # --------------------------------------------------
-        # Discard incomplete games
-        # --------------------------------------------------
-
         if not result.completed:
 
             incomplete_games += 1
 
             print(
+                f"Game {game_number}: "
                 "Skipping incomplete game."
             )
 
             continue
 
         completed_games += 1
-
-        # --------------------------------------------------
-        # Add new training data
-        # --------------------------------------------------
 
         if result.training_data:
 
@@ -312,25 +362,14 @@ def generate_self_play_data(
                 result.training_data
             )
 
-        # --------------------------------------------------
-        # Result statistics
-        # --------------------------------------------------
-
         if result.result == 1:
-
             white_wins += 1
 
         elif result.result == -1:
-
             black_wins += 1
 
         elif result.result == 0:
-
             draws += 1
-
-    # ======================================================
-    # SUMMARY
-    # ======================================================
 
     print(
         "\n=============================="
@@ -488,6 +527,8 @@ def train_model(
     policy_loss_sum = 0.0
     value_loss_sum = 0.0
 
+    scaler = create_scaler()
+
     for step in range(
         1,
         TRAINING_STEPS + 1
@@ -497,40 +538,78 @@ def train_model(
             TRAINING_BATCH_SIZE
         )
 
-        states = torch.stack(
+        # Build contiguous CPU arrays in one operation instead of
+        # constructing many small tensors with torch.stack().
+        states_np = np.asarray(
             [
-                torch.from_numpy(
-                    sample[0]
-                ).float()
+                sample[0]
                 for sample in batch_samples
-            ]
-        ).to(device)
+            ],
+            dtype=np.float32
+        )
 
-        policies = torch.stack(
+        policies_np = np.asarray(
             [
-                torch.from_numpy(
-                    sample[1]
-                ).float()
+                sample[1]
                 for sample in batch_samples
-            ]
-        ).to(device)
+            ],
+            dtype=np.float32
+        )
 
-        values = torch.stack(
+        values_np = np.asarray(
             [
-                torch.tensor(
-                    sample[2],
-                    dtype=torch.float32
-                )
+                sample[2]
                 for sample in batch_samples
-            ]
-        ).to(device)
+            ],
+            dtype=np.float32
+        )
 
-        total_loss, policy_loss, value_loss = train_one_batch(
-            model=model,
-            optimizer=optimizer,
-            states=states,
-            target_policy=policies,
-            target_value=values
+        states = torch.from_numpy(
+            states_np
+        )
+
+        policies = torch.from_numpy(
+            policies_np
+        )
+
+        values = torch.from_numpy(
+            values_np
+        )
+
+        if device.type == "cuda":
+            states = states.pin_memory()
+            policies = policies.pin_memory()
+            values = values.pin_memory()
+
+        states = states.to(
+            device,
+            non_blocking=(device.type == "cuda")
+        )
+
+        policies = policies.to(
+            device,
+            non_blocking=(device.type == "cuda")
+        )
+
+        values = values.to(
+            device,
+            non_blocking=(device.type == "cuda")
+        )
+
+        if device.type == "cuda":
+            states = states.contiguous(
+                memory_format=torch.channels_last
+            )
+
+        total_loss, policy_loss, value_loss = (
+            train_one_batch(
+                model=model,
+                optimizer=optimizer,
+                states=states,
+                target_policy=policies,
+                target_value=values,
+                scaler=scaler
+            )
         )
 
         total_loss_sum += total_loss
@@ -587,7 +666,7 @@ def save_rl_checkpoint(
             optimizer.state_dict(),
 
         "iteration":
-            ITERATION,
+            RL_ITERATION,
 
         "previous_checkpoint":
             PREVIOUS_CHECKPOINT,
@@ -684,13 +763,37 @@ def main():
 
     print(
         "Iteration:",
-        ITERATION
+        RL_ITERATION
     )
 
     print(
         "Device:",
         device
     )
+
+    if device.type == "cuda":
+
+        print(
+            "GPU:",
+            torch.cuda.get_device_name(0)
+        )
+
+        print(
+            "CUDA version:",
+            torch.version.cuda
+        )
+
+        print(
+            "Mixed precision: FP16"
+        )
+
+        print(
+            "Channels last: enabled"
+        )
+
+        print(
+            "TF32: enabled"
+        )
 
     print(
         "Previous checkpoint:",
@@ -732,7 +835,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Load RL1 model
+    # Load previous model
     # ------------------------------------------------------
 
     checkpoint = load_previous_checkpoint(
@@ -768,7 +871,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Load RL1 replay buffer
+    # Load previous replay buffer
     # ------------------------------------------------------
 
     replay_buffer = load_previous_replay_buffer(
@@ -816,7 +919,7 @@ def main():
     )
 
     # ------------------------------------------------------
-    # Save RL2 checkpoint
+    # Save RL checkpoint
     # ------------------------------------------------------
 
     save_rl_checkpoint(
@@ -835,7 +938,7 @@ def main():
     )
 
     print(
-        f"RL ITERATION {ITERATION} COMPLETE"
+        f"RL ITERATION {RL_ITERATION} COMPLETE"
     )
 
     print(

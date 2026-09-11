@@ -200,38 +200,58 @@ class MCTS:
         if not boards:
             return None, None
 
+        # python-chess boards are CPU/Python objects, so board encoding
+        # remains on CPU.  All positions are encoded first and transferred
+        # to the GPU together as one batch.
         states = np.stack(
             [
                 StateEncoder.encode(board)
                 for board in boards
             ]
         ).astype(
-            np.float32
+            np.float32,
+            copy=False
         )
 
         device = next(
             self.model.parameters()
         ).device
 
-        state_tensor = torch.from_numpy(
-            states
-        ).to(
-            device
+        state_tensor = torch.from_numpy(states)
+
+        if device.type == "cuda":
+            state_tensor = state_tensor.pin_memory()
+
+        state_tensor = state_tensor.to(
+            device,
+            non_blocking=(device.type == "cuda")
         )
+
+        if device.type == "cuda":
+            state_tensor = state_tensor.contiguous(
+                memory_format=torch.channels_last
+            )
 
         self.model.eval()
 
-        with torch.no_grad():
-
-            policy_logits, values = (
-                self.model(
+        with torch.inference_mode():
+            if device.type == "cuda":
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=torch.float16
+                ):
+                    policy_logits, values = self.model(
+                        state_tensor
+                    )
+            else:
+                policy_logits, values = self.model(
                     state_tensor
                 )
-            )
 
+        # MCTS tree math and policy conversion stay in FP32.
         return (
-            policy_logits,
-            values
+            policy_logits.float(),
+            values.float()
         )
 
     # ==================================================
