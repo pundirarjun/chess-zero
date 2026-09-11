@@ -31,7 +31,7 @@ from training.trainer import train_one_batch
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 2
+RL_ITERATION = 3
 PREVIOUS_ITERATION = RL_ITERATION - 1
 KAGGLE_CHECKPOINT_ROOT = "/kaggle/input/datasets/arjunthakur9999/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"
@@ -44,7 +44,7 @@ OUTPUT_REPLAY_BUFFER = os.path.join(LOCAL_CHECKPOINT_ROOT, f"replay_buffer_rl{RL
 # ---------------------------------------------------------------------------
 # Self-play.  Increase games first to keep the GPU busy; then increase sims.
 # ---------------------------------------------------------------------------
-NUM_SELF_PLAY_GAMES = 32
+NUM_SELF_PLAY_GAMES = 64
 NUM_SIMULATIONS = 50
 MAX_MOVES = 300
 MCTS_BATCH_SIZE = 32  # API compatibility; GPU MCTS batches all active games.
@@ -59,7 +59,7 @@ DIRICHLET_EPSILON = 0.25
 # ---------------------------------------------------------------------------
 REPLAY_BUFFER_CAPACITY = 50000
 TRAINING_BATCH_SIZE = 128
-TRAINING_STEPS = 100
+TRAINING_STEPS = 150
 LEARNING_RATE = 1e-4
 SEED = 42
 
