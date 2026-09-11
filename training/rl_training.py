@@ -78,9 +78,9 @@ OUTPUT_REPLAY_BUFFER = os.path.join(
 # SELF-PLAY CONFIGURATION
 # ==========================================================
 
-NUM_SELF_PLAY_GAMES = 10
-NUM_SIMULATIONS = 50
-MAX_MOVES = 300
+NUM_SELF_PLAY_GAMES = 2
+NUM_SIMULATIONS = 10
+MAX_MOVES = 50
 
 # Global neural-network batch size used by multi-game MCTS.
 MCTS_BATCH_SIZE = 128
@@ -103,7 +103,7 @@ REPLAY_BUFFER_CAPACITY = 50000
 # ==========================================================
 
 TRAINING_BATCH_SIZE = 32
-TRAINING_STEPS = 50
+TRAINING_STEPS = 2
 LEARNING_RATE = 1e-4
 
 
