@@ -69,8 +69,7 @@ PRETRAINED_CHECKPOINT = (
 
 
 RL_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/"
-    "checkpoints/rl_iteration_3.pt"
+    "/kaggle/working/chess-zero/checkpoints/rl_iteration_5.pt"
 )
 
 
@@ -1299,7 +1298,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL4 Checkpoint:"
+        "Loaded RL5 Checkpoint:"
     )
 
     print(
@@ -1308,7 +1307,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL3 checkpoint:"
+        "Loaded RL4 checkpoint:"
     )
 
     print(
@@ -1322,6 +1321,6 @@ if __name__ == "__main__":
     evaluate_models(
         pretrained,
         rl,
-        "RL iteration 4",
-        "RL Iteration 3"
+        "RL iteration 5",
+        "RL Iteration 4"
     )
