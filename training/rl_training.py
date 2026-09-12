@@ -31,7 +31,7 @@ from training.trainer import train_one_batch
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 8
+RL_ITERATION = 9
 PREVIOUS_ITERATION = RL_ITERATION - 1
 KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
