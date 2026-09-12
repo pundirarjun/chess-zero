@@ -146,13 +146,27 @@ def _play_games_gpu(
             model=model,
             device=device,
         )
-        search.search(active_states, num_simulations=num_simulations)
-        search.add_dirichlet_noise(dirichlet_alpha, dirichlet_epsilon)
 
-        # Training targets are raw normalized visit counts; temperature only
-        # affects the action sampled from that distribution.
+        search.search(
+            active_states,
+            num_simulations=num_simulations,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+        )
+
         policies = search.root_visit_policy()
-        current_temperature = temperature if round_no <= temperature_moves else 0.0
+
+        # Exploration schedule for self-play action selection.
+        # Moves 1-60: strong exploration
+        # Moves 61-120: reduced exploration
+        # Moves 121+: low exploration while still keeping some randomness
+        if round_no <= 60:
+            current_temperature = 1.0
+        elif round_no <= 120:
+            current_temperature = 0.25
+        else:
+            current_temperature = 0.10
+
         actions = search.select_actions(current_temperature)
         next_states = search.advance(actions)
 

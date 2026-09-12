@@ -270,7 +270,11 @@ class GPUMCTS:
         checkmate = no_moves & check
         return torch.where(checkmate, -torch.ones_like(states.halfmove_clock, dtype=torch.float32), torch.zeros_like(states.halfmove_clock, dtype=torch.float32))
 
-    def search(self, root_states: GPUChess, num_simulations: int):
+    def search(self,
+    root_states: GPUChess,
+    num_simulations: int,
+    dirichlet_alpha: float | None = None,
+    dirichlet_epsilon: float = 0.25,):
         if root_states.device != self.device:
             raise ValueError("root_states must live on the GPUMCTS device")
         if root_states.pieces.shape[0] <= 0:
@@ -284,6 +288,12 @@ class GPUMCTS:
 
         logits, _, legal = self._evaluate(roots)
         root_new_terminal = self._expand(roots, logits, legal)
+
+        if dirichlet_alpha is not None:
+            self.add_dirichlet_noise(
+                dirichlet_alpha,
+                dirichlet_epsilon,
+            )
 
         if num_simulations <= 0:
             return
