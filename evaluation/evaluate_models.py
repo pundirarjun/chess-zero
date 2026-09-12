@@ -1298,7 +1298,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL5 Checkpoint:"
+        "Loaded RL4 Checkpoint:"
     )
 
     print(
@@ -1307,7 +1307,7 @@ if __name__ == "__main__":
 
     print()
     print(
-        "Loaded RL4 checkpoint:"
+        "Loaded RL5 checkpoint:"
     )
 
     print(
@@ -1321,6 +1321,6 @@ if __name__ == "__main__":
     evaluate_models(
         pretrained,
         rl,
-        "RL iteration 5",
-        "RL Iteration 4"
+        "RL iteration 4",
+        "RL Iteration 5"
     )

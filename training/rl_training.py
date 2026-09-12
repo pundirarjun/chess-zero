@@ -31,9 +31,9 @@ from training.trainer import train_one_batch
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 5
+RL_ITERATION = 6
 PREVIOUS_ITERATION = RL_ITERATION - 1
-KAGGLE_CHECKPOINT_ROOT = "/kaggle/input/datasets/arjunthakur9999/checkpoints"
+KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"
 PREVIOUS_CHECKPOINT = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"rl_iteration_{PREVIOUS_ITERATION}.pt")
 PREVIOUS_REPLAY_BUFFER = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"replay_buffer_rl{PREVIOUS_ITERATION}.pt")
@@ -49,7 +49,7 @@ NUM_SIMULATIONS = 50
 MAX_MOVES = 300
 MCTS_BATCH_SIZE = 32  # API compatibility; GPU MCTS batches all active games.
 TEMPERATURE = 1.0
-TEMPERATURE_MOVES = 40
+TEMPERATURE_MOVES = 60
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_EPSILON = 0.25
 
