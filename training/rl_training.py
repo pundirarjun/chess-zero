@@ -31,7 +31,7 @@ from training.train_step import build_gpu_replay, train_from_gpu_replay
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 13
+RL_ITERATION = 14
 PREVIOUS_ITERATION = RL_ITERATION - 1
 KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
@@ -57,7 +57,7 @@ DIRICHLET_EPSILON = 0.25
 # ---------------------------------------------------------------------------
 # Replay / training
 # ---------------------------------------------------------------------------
-REPLAY_BUFFER_CAPACITY = 50000
+REPLAY_BUFFER_CAPACITY = 100000
 TRAINING_BATCH_SIZE = 256
 TRAINING_STEPS = 150
 LEARNING_RATE = 1e-4
