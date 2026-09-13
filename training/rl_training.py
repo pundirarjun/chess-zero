@@ -31,7 +31,7 @@ from training.trainer import train_one_batch
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 9
+RL_ITERATION = 10
 PREVIOUS_ITERATION = RL_ITERATION - 1
 KAGGLE_CHECKPOINT_ROOT = "/kaggle/input/datasets/arjunthakur9999/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
