@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import re
 
 import torch
 
@@ -34,14 +35,14 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 200
+NUM_GAMES = 100
 
-NUM_SIMULATIONS = 50
+NUM_SIMULATIONS = 100
 
-MAX_MOVES = 300
+MAX_MOVES = 400
 
 # 0.0 = deterministic evaluation.
-EVALUATION_TEMPERATURE = 0.25
+EVALUATION_TEMPERATURE = 0.0
 
 ACTION_SPACE_SIZE = 4544
 
@@ -61,14 +62,14 @@ DEVICE = torch.device(
 # CHECKPOINTS
 # ==========================================================
 
-PRETRAINED_CHECKPOINT = (
+MODEL_A_CHECKPOINT = (
     "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_4.pt"
 )
 
 
 
 
-RL_CHECKPOINT = (
+MODEL_B_CHECKPOINT = (
     "/kaggle/working/chess-zero/checkpoints/rl_iteration_5.pt"
 )
 
@@ -993,13 +994,12 @@ def play_games(
         # PROGRESS
         # ==================================================
 
-        if round_no % 10 == 0:
-
-            print(
-                f"Evaluation round {round_no} | "
-                f"active games: "
-                f"{int(active.sum().item())}/{NUM_GAMES}"
-            )
+        print(
+            f"Evaluation round {round_no} | "
+            f"active games: "
+            f"{int(active.sum().item())}/{NUM_GAMES}",
+            flush=True,
+        )
 
     # ======================================================
     # BUILD FINAL RESULTS
@@ -1284,43 +1284,64 @@ if __name__ == "__main__":
     # LOAD MODELS
     # ------------------------------------------------------
 
-    pretrained, pretrained_checkpoint = (
+    model_a, model_a_checkpoint = (
         create_model(
-            PRETRAINED_CHECKPOINT
+            MODEL_A_CHECKPOINT
         )
     )
 
-    rl, rl_checkpoint = (
+    model_b, model_b_checkpoint = (
         create_model(
-            RL_CHECKPOINT
+            MODEL_B_CHECKPOINT
         )
     )
 
+    # ------------------------------------------------------
+    # AUTOMATIC MODEL NAMES FROM CHECKPOINT PATHS
+    # ------------------------------------------------------
+
+    def checkpoint_name(path):
+        """
+        Create a readable model name from the checkpoint filename.
+
+        Examples:
+            rl_iteration_4.pt  -> RL iteration 4
+            rl_iteration_12.pt -> RL iteration 12
+            pretrained_phase1.pt -> Pretrained phase 1
+        """
+        filename = os.path.basename(path)
+        stem = os.path.splitext(filename)[0]
+
+        match = re.search(r"rl_iteration[_-]?(\d+)", stem, re.IGNORECASE)
+        if match:
+            return f"RL iteration {match.group(1)}"
+
+        match = re.search(r"pretrained[_-]?phase[_-]?(\d+)", stem, re.IGNORECASE)
+        if match:
+            return f"Pretrained phase {match.group(1)}"
+
+        return stem.replace("_", " ").replace("-", " ").title()
+
+    name_a = checkpoint_name(MODEL_A_CHECKPOINT)
+    name_b = checkpoint_name(MODEL_B_CHECKPOINT)
+
     print()
-    print(
-        "Loaded RL4 Checkpoint:"
-    )
-
-    print(
-        PRETRAINED_CHECKPOINT
-    )
+    print("Loaded model A checkpoint:")
+    print(MODEL_A_CHECKPOINT)
+    print("Model A:", name_a)
 
     print()
-    print(
-        "Loaded RL5 checkpoint:"
-    )
-
-    print(
-        RL_CHECKPOINT
-    )
+    print("Loaded model B checkpoint:")
+    print(MODEL_B_CHECKPOINT)
+    print("Model B:", name_b)
 
     # ------------------------------------------------------
     # EVALUATE
     # ------------------------------------------------------
 
     evaluate_models(
-        pretrained,
-        rl,
-        "RL iteration 4",
-        "RL Iteration 5"
+        model_a,
+        model_b,
+        name_a,
+        name_b
     )
