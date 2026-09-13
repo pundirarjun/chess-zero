@@ -100,11 +100,7 @@ def _play_games_gpu(
     device = next(model.parameters()).device
     if device.type != "cuda":
         raise RuntimeError("GPU self-play requires a CUDA model")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-
-    # Self-play never builds autograd graphs.
-    model.eval()
+    _ = batch_size
 
     states = GPUChess(device, num_games)
     search = GPUMCTS(model=model, device=device)
@@ -177,7 +173,7 @@ def _play_games_gpu(
             num_simulations=num_simulations,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_epsilon=dirichlet_epsilon,
-            simulation_batch_size=batch_size,
+            batch_size=batch_size,
         )
         policies = search.root_visit_policy()
         current_temperature = temperature if round_no <= temperature_moves else 0.10
