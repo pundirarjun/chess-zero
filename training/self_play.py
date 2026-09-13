@@ -103,6 +103,13 @@ def _play_games_gpu(
     active = torch.ones((num_games,), dtype=torch.bool, device=device)
     results: list[Optional[SelfPlayResult]] = [None] * num_games
 
+    # Reuse one MCTS object across moves. search() resets its tree each move,
+    # so this preserves search behavior while avoiding repeated object setup.
+    search = GPUMCTS(
+        model=model,
+        device=device,
+    )
+
     # Repetition tracking is intentionally outside the tensorized MCTS state.
     # It is small host-side metadata and does not participate in the hot chess
     # move-generation/search path.  The position key is derived from GPU state.
@@ -142,11 +149,6 @@ def _play_games_gpu(
             active_idx = torch.nonzero(active, as_tuple=False).flatten()
             active_states = states.select(active_idx)
 
-        search = GPUMCTS(
-            model=model,
-            device=device,
-        )
-
         search.search(
             active_states,
             num_simulations=num_simulations,
@@ -160,10 +162,8 @@ def _play_games_gpu(
         # Moves 1-60: strong exploration
         # Moves 61-120: reduced exploration
         # Moves 121+: low exploration while still keeping some randomness
-        if round_no <= 60:
-            current_temperature = 1.0
-        elif round_no <= 120:
-            current_temperature = 0.25
+        if round_no <= temperature_moves:
+            current_temperature = temperature
         else:
             current_temperature = 0.10
 
