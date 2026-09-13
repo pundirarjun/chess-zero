@@ -242,6 +242,104 @@ class GPUMCTS:
         return (counts == 0)
 
 
+    def _select_leaves_batched(
+        self,
+        root_ids: torch.Tensor,
+        simulation_width: int,
+        max_depth: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select many leaves per root in one GPU batch.
+
+        The simulation dimension is carried as a tensor dimension instead of
+        executing one Python simulation at a time.  Root children are distributed
+        across lanes so a batch does not collapse onto the same first move.
+        Deeper selection is vectorized over all lanes.  No GPU scalar is read by
+        the host in this routine.
+        """
+        g = root_ids.numel()
+        w = int(simulation_width)
+        if g == 0 or w <= 0:
+            empty_l = torch.empty((0,), dtype=torch.long, device=self.device)
+            empty_p = torch.empty((0, 1), dtype=torch.int32, device=self.device)
+            return empty_l, empty_p
+
+        # One independent simulation lane per (game, lane).
+        roots = root_ids[:, None].expand(g, w).reshape(-1)
+        lanes = torch.arange(w, device=self.device, dtype=torch.long)
+        lane_rank = lanes[None, :].expand(g, -1)
+
+        current = roots.clone()
+        active = torch.ones((g * w,), dtype=torch.bool, device=self.device)
+        paths = torch.full(
+            (g * w, max_depth + 1),
+            -1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        paths[:, 0] = roots.to(torch.int32)
+
+        # First selection is special: distribute lanes over different root
+        # children. This is the GPU equivalent of virtual-loss root diversity.
+        starts = self.edge_start[root_ids].to(torch.long)
+        edge_idx = starts[:, None] + self._child_cols[None, :]
+        safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
+        child = self.edge_child[safe].clamp_min(0).to(torch.long)
+        visits = self.visit_count[child].float()
+        sums = self.value_sum[child]
+        q = torch.where(visits > 0, sums / visits, torch.zeros_like(sums))
+        priors = self.edge_prior[safe]
+        parent_visits = self.visit_count[root_ids].float().clamp_min(1.0)[:, None]
+        scores = -q + self.c_puct * priors * torch.sqrt(parent_visits) / (1.0 + visits)
+        scores = scores.masked_fill(~valid, -torch.inf)
+
+        # top-k is entirely CUDA. If a position has fewer legal moves than the
+        # requested width, modulo the legal count reuses valid ranks.
+        k = min(w, self.max_children)
+        top_scores, top_pos = torch.topk(scores, k=k, dim=1, largest=True, sorted=True)
+        counts = self.edge_count[root_ids].to(torch.long).clamp_min(1)
+        rank = lane_rank % counts[:, None]
+        rank = rank.clamp_max(k - 1)
+        first_pos = top_pos.gather(1, rank)
+        first_valid = valid.gather(1, first_pos)
+        first_child = child.gather(1, first_pos)
+
+        lane_mask = first_valid.reshape(-1)
+        current = torch.where(lane_mask, first_child.reshape(-1), current)
+        paths[lane_mask, 1] = current[lane_mask].to(torch.int32)
+        active = lane_mask & self.expanded[current.clamp_max(self.max_nodes - 1)] & ~self.terminal[current.clamp_max(self.max_nodes - 1)]
+
+        depth = 1
+
+        # Continue all lanes together. Once a lane reaches an unexpanded or
+        # terminal node it stops; its path remains unchanged.
+        for depth_loop in range(1, max_depth):
+            selectable = active
+            nodes = current.clamp_max(self.max_nodes - 1)
+            starts2 = self.edge_start[nodes].to(torch.long).clamp_min(0)
+            edge_idx2 = starts2[:, None] + self._child_cols[None, :]
+            safe2 = edge_idx2.clamp(0, self.max_edges - 1)
+            valid2 = self.edge_valid[safe2] & selectable[:, None]
+            child2 = self.edge_child[safe2].clamp_min(0).to(torch.long)
+            visits2 = self.visit_count[child2].float()
+            sums2 = self.value_sum[child2]
+            q2 = torch.where(visits2 > 0, sums2 / visits2, torch.zeros_like(sums2))
+            priors2 = self.edge_prior[safe2]
+            parent_v2 = self.visit_count[nodes].float().clamp_min(1.0)[:, None]
+            scores2 = -q2 + self.c_puct * priors2 * torch.sqrt(parent_v2) / (1.0 + visits2)
+            scores2 = scores2.masked_fill(~valid2, -torch.inf)
+
+            best = torch.argmax(scores2, dim=1)
+            next_nodes = child2.gather(1, best[:, None]).squeeze(1)
+            next_valid = valid2.gather(1, best[:, None]).squeeze(1)
+
+            current = torch.where(next_valid, next_nodes, current)
+            depth += 1
+            paths[next_valid, depth] = current[next_valid].to(torch.int32)
+            active = next_valid & self.expanded[current.clamp_max(self.max_nodes - 1)] & ~self.terminal[current.clamp_max(self.max_nodes - 1)]
+
+        return current, paths[:, :depth + 1]
+
     def _select_leaves(self, root_ids: torch.Tensor, max_depth: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Select one leaf per root in parallel and return leaf ids + paths."""
         g = root_ids.numel()
@@ -285,23 +383,37 @@ class GPUMCTS:
         return current, paths[:, :depth + 1]
 
     def _backup(self, paths: torch.Tensor, values: torch.Tensor):
-        # Back up each root's path from leaf to root.  Each row is independent;
-        # duplicate-node collisions are possible only within a single tree and
-        # are handled by the sequential depth updates.
-        depth = paths.shape[1]
-        v = values.clone()
-        for d in range(depth - 1, -1, -1):
-            nodes = paths[:, d].to(torch.long)
-            valid = nodes >= 0
-            n = nodes[valid]
-            if n.numel() == 0:
-                continue
-            vv = v[valid]
-            self.visit_count.index_add_(
-                0, n, torch.ones(vv.shape, dtype=torch.int32, device=self.device)
-            )
-            self.value_sum.index_add_(0, n, vv)
-            v = -v
+        """Vectorized backup for all simulation lanes.
+
+        The previous implementation iterated over every path depth in Python.
+        Here all valid path entries are flattened and accumulated with one
+        GPU index_add. Alternating signs are computed from each lane's path
+        length, so leaf values are backed up with the correct player-to-move
+        perspective.
+        """
+        if paths.numel() == 0:
+            return
+
+        valid = paths >= 0
+        lengths = valid.sum(dim=1).to(torch.long)
+        depth = torch.arange(paths.shape[1], device=self.device, dtype=torch.long)[None, :]
+        sign = torch.where(
+            ((lengths[:, None] - 1 - depth) & 1) == 0,
+            torch.ones_like(depth, dtype=torch.float32),
+            -torch.ones_like(depth, dtype=torch.float32),
+        )
+
+        nodes = paths.to(torch.long)
+        flat_valid = valid.reshape(-1)
+        flat_nodes = nodes.reshape(-1)[flat_valid]
+        flat_values = (values[:, None] * sign).reshape(-1)[flat_valid]
+
+        self.visit_count.index_add_(
+            0,
+            flat_nodes,
+            torch.ones(flat_nodes.shape, dtype=torch.int32, device=self.device),
+        )
+        self.value_sum.index_add_(0, flat_nodes, flat_values)
 
     def _terminal_values(self, node_ids: torch.Tensor) -> torch.Tensor:
         states = self._state_view(node_ids)
@@ -311,11 +423,21 @@ class GPUMCTS:
         checkmate = no_moves & check
         return torch.where(checkmate, -torch.ones_like(states.halfmove_clock, dtype=torch.float32), torch.zeros_like(states.halfmove_clock, dtype=torch.float32))
 
-    def search(self,
-    root_states: GPUChess,
-    num_simulations: int,
-    dirichlet_alpha: float | None = None,
-    dirichlet_epsilon: float = 0.25,):
+    def search(
+        self,
+        root_states: GPUChess,
+        num_simulations: int,
+        dirichlet_alpha: float | None = None,
+        dirichlet_epsilon: float = 0.25,
+        simulation_batch_size: int = 32,
+    ):
+        """Run batched GPU MCTS.
+
+        ``simulation_batch_size`` simulations per game are selected and
+        evaluated together. This removes the old one-Python-iteration-per-
+        simulation bottleneck and feeds much larger neural-network batches
+        to CUDA. The tree itself remains entirely tensorized on the GPU.
+        """
         if root_states.device != self.device:
             raise ValueError("root_states must live on the GPUMCTS device")
         if root_states.pieces.shape[0] <= 0:
@@ -323,52 +445,82 @@ class GPUMCTS:
         if num_simulations < 0:
             raise ValueError("num_simulations must be non-negative")
 
+        width = max(1, min(int(simulation_batch_size), int(num_simulations) if num_simulations else 1))
         self._allocate(root_states.pieces.shape[0], max(1, num_simulations))
         roots = self._root_ids
         self.model.eval()
         self._write_states(roots, root_states)
 
-        logits, _, legal = self._evaluate(roots)
-        root_new_terminal = self._expand(roots, logits, legal)
+        with torch.inference_mode():
+            logits, _, legal = self._evaluate(roots)
+            self._expand(roots, logits, legal)
 
-        if dirichlet_alpha is not None:
-            self.add_dirichlet_noise(
-                dirichlet_alpha,
-                dirichlet_epsilon,
-            )
+            if dirichlet_alpha is not None:
+                self.add_dirichlet_noise(dirichlet_alpha, dirichlet_epsilon)
 
-        if num_simulations <= 0:
-            return
+            if num_simulations <= 0:
+                return
 
-        # One simulation per root is selected at each round.  The resulting
-        # leaf evaluations form one large GPU batch, maximizing network work.
-        max_depth = max(8, num_simulations + 2)
-        for _ in range(num_simulations):
-            leaves, paths = self._select_leaves(roots, max_depth=max_depth)
-            terminal = self.terminal[leaves]
-            values = torch.zeros((self.num_games,), dtype=torch.float32, device=self.device)
+            # A fixed depth keeps the GPU work bounded. Chess positions normally
+            # hit an unexpanded leaf long before this limit.
+            max_depth = min(64, max(8, num_simulations + 2))
+            remaining = int(num_simulations)
 
-            t_ids = leaves[terminal]
-            if t_ids.numel() > 0:
-                values[terminal] = self._terminal_values(t_ids)
-
-            nonterminal = ~terminal
-            nt_ids = leaves[nonterminal]
-            if nt_ids.numel() > 0:
-                logits, nn_values, legal = self._evaluate(nt_ids)
-                self._expand(nt_ids, logits, legal)
-                no_moves = ~legal.any(dim=1)
-                check = self._state_view(nt_ids).is_in_check()
-                exact_terminal_value = torch.where(
-                    no_moves & check,
-                    -torch.ones_like(nn_values),
-                    torch.zeros_like(nn_values),
+            while remaining > 0:
+                batch = min(width, remaining)
+                leaves, paths = self._select_leaves_batched(
+                    roots,
+                    simulation_width=batch,
+                    max_depth=max_depth,
                 )
-                nt_view = self._state_view(nt_ids)
-                newly_terminal = no_moves | (nt_view.halfmove_clock >= 100) | nt_view.insufficient_material()
-                values[nonterminal] = torch.where(newly_terminal, exact_terminal_value, nn_values)
 
-            self._backup(paths, values)
+                # Deduplicate leaf states before NN evaluation/expansion. This
+                # prevents multiple lanes from allocating the same node twice.
+                unique_leaves, inverse = torch.unique(
+                    leaves,
+                    sorted=False,
+                    return_inverse=True,
+                )
+                terminal_unique = self.terminal[unique_leaves]
+                unique_values = torch.zeros(
+                    (unique_leaves.numel(),),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+
+                t_ids = unique_leaves[terminal_unique]
+                if t_ids.numel() > 0:
+                    unique_values[terminal_unique] = self._terminal_values(t_ids)
+
+                nt_mask = ~terminal_unique
+                nt_ids = unique_leaves[nt_mask]
+                if nt_ids.numel() > 0:
+                    logits2, nn_values, legal2 = self._evaluate(nt_ids)
+                    self._expand(nt_ids, logits2, legal2)
+
+                    nt_view = self._state_view(nt_ids)
+                    no_moves = ~legal2.any(dim=1)
+                    check = nt_view.is_in_check()
+                    checkmate_value = torch.where(
+                        no_moves & check,
+                        -torch.ones_like(nn_values),
+                        torch.zeros_like(nn_values),
+                    )
+                    newly_terminal = (
+                        no_moves
+                        | (nt_view.halfmove_clock >= 100)
+                        | nt_view.insufficient_material()
+                    )
+                    evaluated_values = torch.where(
+                        newly_terminal,
+                        checkmate_value,
+                        nn_values,
+                    )
+                    unique_values[nt_mask] = evaluated_values
+
+                values = unique_values[inverse]
+                self._backup(paths, values)
+                remaining -= batch
 
     def root_policy(self, temperature: float = 1.0) -> torch.Tensor:
         roots = self._root_ids
