@@ -33,7 +33,7 @@ from training.train_step import build_gpu_replay, train_from_gpu_replay
 # ---------------------------------------------------------------------------
 RL_ITERATION = 11
 PREVIOUS_ITERATION = RL_ITERATION - 1
-KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
+KAGGLE_CHECKPOINT_ROOT = "/kaggle/input/datasets/arjunthakur9999/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
 PREVIOUS_CHECKPOINT = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"rl_iteration_{PREVIOUS_ITERATION}.pt")
 PREVIOUS_REPLAY_BUFFER = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"replay_buffer_rl{PREVIOUS_ITERATION}.pt")
