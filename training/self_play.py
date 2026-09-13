@@ -232,6 +232,14 @@ def _play_games_gpu(
             completed_tensor[global_idx] = True
             active[global_idx] = False
 
+        # Progress: print every self-play round.
+        # flush=True makes the update appear immediately in Kaggle/terminal output.
+        print(
+            f"GPU self-play round {round_no} | "
+            f"active games: {int(active.sum().item())}/{num_games}",
+            flush=True,
+        )
+
     # Any game still active reached the move budget and is deliberately not
     # converted into training data.
     max_idx = torch.nonzero(active, as_tuple=False).flatten()
