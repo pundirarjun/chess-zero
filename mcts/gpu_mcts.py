@@ -78,9 +78,15 @@ class GPUMCTS:
         # One root plus at most one newly expanded leaf per simulation and game.
         # Each expansion can have at most 218 legal chess moves, but 256 keeps
         # room for the complete 4544 action space's promotion structure.
-        expansions = num_games * (num_simulations + 1)
+        # Fixed GPU edge slots: every node owns max_children contiguous slots.
+        # This removes the old dynamic edge-pool accounting and its GPU->CPU
+        # .item() synchronization from the hot path.
+        # Allocate a bounded pool based on the maximum number of expansions.
+        # Each simulation can add at most max_children child nodes per active
+        # root, so the node/edge pools remain linear in simulations.
+        expansions = num_games * (max(1, num_simulations) + 1)
+        self.max_nodes = num_games + expansions * self.max_children
         self.max_edges = expansions * self.max_children
-        self.max_nodes = num_games + self.max_edges
         self.num_games = num_games
 
         dev = self.device

@@ -33,7 +33,7 @@ from training.train_step import build_gpu_replay, train_from_gpu_replay
 # ---------------------------------------------------------------------------
 RL_ITERATION = 11
 PREVIOUS_ITERATION = RL_ITERATION - 1
-KAGGLE_CHECKPOINT_ROOT = "/kaggle/input/datasets/arjunthakur9999/checkpoints"
+KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
 PREVIOUS_CHECKPOINT = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"rl_iteration_{PREVIOUS_ITERATION}.pt")
 PREVIOUS_REPLAY_BUFFER = os.path.join(KAGGLE_CHECKPOINT_ROOT, f"replay_buffer_rl{PREVIOUS_ITERATION}.pt")
@@ -44,10 +44,10 @@ OUTPUT_REPLAY_BUFFER = os.path.join(LOCAL_CHECKPOINT_ROOT, f"replay_buffer_rl{RL
 # ---------------------------------------------------------------------------
 # Self-play.  Increase games first to keep the GPU busy; then increase sims.
 # ---------------------------------------------------------------------------
-NUM_SELF_PLAY_GAMES = 64
+NUM_SELF_PLAY_GAMES = 128
 NUM_SIMULATIONS = 100
 MAX_MOVES = 400
-MCTS_BATCH_SIZE = 32  # API compatibility; GPU MCTS batches all active games.
+MCTS_BATCH_SIZE = 64  # GPU search batch width / active-game batch.
 TEMPERATURE = 1.0
 TEMPERATURE_MOVES = 60
 DIRICHLET_ALPHA = 0.3
@@ -58,7 +58,7 @@ DIRICHLET_EPSILON = 0.25
 # Replay / training
 # ---------------------------------------------------------------------------
 REPLAY_BUFFER_CAPACITY = 50000
-TRAINING_BATCH_SIZE = 128
+TRAINING_BATCH_SIZE = 256
 TRAINING_STEPS = 150
 LEARNING_RATE = 1e-4
 SEED = 42
