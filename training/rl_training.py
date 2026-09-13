@@ -25,7 +25,7 @@ from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
 from training.self_play import play_games
 from training.replay_buffer import ReplayBuffer
-from training.trainer import train_one_batch
+from training.train_step import build_gpu_replay, train_from_gpu_replay
 
 
 # ---------------------------------------------------------------------------
@@ -194,48 +194,24 @@ def train_model(model, optimizer, replay_buffer):
     if len(replay_buffer) < TRAINING_BATCH_SIZE:
         raise RuntimeError(f"Replay buffer has {len(replay_buffer)} samples; need {TRAINING_BATCH_SIZE}.")
 
-    scaler = create_scaler()
-    totals = [0.0, 0.0, 0.0]
     print("\n==============================")
     print("GPU TRAINING")
     print("==============================")
+    print("Loading replay buffer to GPU once...")
 
-    for step in range(1, TRAINING_STEPS + 1):
-        batch = replay_buffer.sample(TRAINING_BATCH_SIZE)
-        states_np = np.asarray([x[0] for x in batch], dtype=np.float32)
-        policies_np = np.asarray([x[1] for x in batch], dtype=np.float32)
-        values_np = np.asarray([x[2] for x in batch], dtype=np.float32)
+    # The complete replay dataset is transferred to CUDA once. Each subsequent
+    # batch is sampled with GPU-generated indices, eliminating the old
+    # Python-list -> NumPy -> pinned-memory -> CUDA pipeline on every step.
+    gpu_replay = build_gpu_replay(replay_buffer, device)
+    print(f"GPU replay samples: {gpu_replay[0].shape[0]}")
 
-        states = torch.from_numpy(states_np)
-        policies = torch.from_numpy(policies_np)
-        values = torch.from_numpy(values_np)
-        if device.type == "cuda":
-            states = states.pin_memory().to(device, non_blocking=True)
-            policies = policies.pin_memory().to(device, non_blocking=True)
-            values = values.pin_memory().to(device, non_blocking=True)
-            states = states.contiguous(memory_format=torch.channels_last)
-        else:
-            states = states.to(device)
-            policies = policies.to(device)
-            values = values.to(device)
-
-        loss, policy_loss, value_loss = train_one_batch(
-            model=model,
-            optimizer=optimizer,
-            states=states,
-            target_policy=policies,
-            target_value=values,
-            scaler=scaler,
-        )
-        totals[0] += loss; totals[1] += policy_loss; totals[2] += value_loss
-        if step == 1 or step % 10 == 0 or step == TRAINING_STEPS:
-            print(f"Step {step}/{TRAINING_STEPS}: Total={loss:.6f} | Policy={policy_loss:.6f} | Value={value_loss:.6f}")
-
-    return {
-        "average_total_loss": totals[0] / TRAINING_STEPS,
-        "average_policy_loss": totals[1] / TRAINING_STEPS,
-        "average_value_loss": totals[2] / TRAINING_STEPS,
-    }
+    return train_from_gpu_replay(
+        model=model,
+        optimizer=optimizer,
+        gpu_replay=gpu_replay,
+        batch_size=TRAINING_BATCH_SIZE,
+        training_steps=TRAINING_STEPS,
+    )
 
 
 def save_rl_checkpoint(model, optimizer, self_play_stats, training_stats):

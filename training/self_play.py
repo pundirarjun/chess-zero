@@ -88,66 +88,85 @@ def _play_games_gpu(
     dirichlet_epsilon=0.25,
     batch_size=128,
 ):
+    """GPU-resident self-play.
+
+    The hot path keeps boards, repetition history, training states, policies and
+    players on CUDA.  CPU is used only after a game finishes (or for final
+    checkpoint/replay serialization).  ``batch_size`` is retained for API
+    compatibility; MCTS receives the complete active batch.
+    """
     if num_games <= 0:
         return []
     device = next(model.parameters()).device
     if device.type != "cuda":
         raise RuntimeError("GPU self-play requires a CUDA model")
-
-    # batch_size is retained for API compatibility. GPU MCTS already batches
-    # one leaf per active game; the model sees the complete active batch.
     _ = batch_size
+
     states = GPUChess(device, num_games)
-    games = [SelfPlayGame() for _ in range(num_games)]
+    search = GPUMCTS(model=model, device=device)
+
+    # All per-move training information remains on the GPU.  0/1 board planes
+    # are stored as uint8 because they are exact and much smaller than float32.
+    sample_states = torch.empty(
+        (num_games, max_moves, 18, 8, 8), dtype=torch.uint8, device=device
+    )
+    sample_policies = torch.empty(
+        (num_games, max_moves, 4544), dtype=torch.float32, device=device
+    )
+    sample_players = torch.empty((num_games, max_moves), dtype=torch.int8, device=device)
+
     move_numbers = torch.ones((num_games,), dtype=torch.int32, device=device)
     active = torch.ones((num_games,), dtype=torch.bool, device=device)
-    results: list[Optional[SelfPlayResult]] = [None] * num_games
+    result_tensor = torch.zeros((num_games,), dtype=torch.int8, device=device)
+    termination_code = torch.zeros((num_games,), dtype=torch.int8, device=device)
+    completed_tensor = torch.zeros((num_games,), dtype=torch.bool, device=device)
 
-    # Reuse one MCTS object across moves. search() resets its tree each move,
-    # so this preserves search behavior while avoiding repeated object setup.
-    search = GPUMCTS(
-        model=model,
-        device=device,
-    )
+    # Full repetition history on GPU.  This replaces state_hash().cpu().tolist()
+    # on every move and therefore removes a major synchronization point.
+    history = torch.empty((num_games, max_moves + 1), dtype=torch.int64, device=device)
 
-    # Repetition tracking is intentionally outside the tensorized MCTS state.
-    # It is small host-side metadata and does not participate in the hot chess
-    # move-generation/search path.  The position key is derived from GPU state.
-    repetition = [dict() for _ in range(num_games)]
+    # Codes: 1 checkmate, 2 stalemate, 3 fifty-move, 4 insufficient,
+    # 5 threefold, 6 max-moves, 7 unknown.
+    CODE_CHECKMATE = 1
+    CODE_STALEMATE = 2
+    CODE_FIFTY = 3
+    CODE_INSUFFICIENT = 4
+    CODE_THREEFOLD = 5
+    CODE_MAX_MOVES = 6
+    CODE_UNKNOWN = 7
 
     round_no = 0
-    while bool(active.any().item()):
+    while round_no < max_moves:
         round_no += 1
         active_idx = torch.nonzero(active, as_tuple=False).flatten()
-        active_states = states.select(active_idx)
-
-        # Record repetitions for the current actual game positions.
-        keys = active_states.state_hash().detach().cpu().tolist()
-        for local, global_idx in enumerate(active_idx.detach().cpu().tolist()):
-            key = int(keys[local])
-            repetition[global_idx][key] = repetition[global_idx].get(key, 0) + 1
-            if repetition[global_idx][key] >= 3:
-                results[global_idx] = SelfPlayResult([], 0, "THREEFOLD_REPETITION", len(games[global_idx].samples), True)
-                active[global_idx] = False
-
-        if not bool(active.any().item()):
+        if active_idx.numel() == 0:
             break
-
-        # Refresh the active set after possible repetition termination.
-        active_idx = torch.nonzero(active, as_tuple=False).flatten()
         active_states = states.select(active_idx)
 
-        # Enforce maximum move count without creating a partial training game.
-        too_long = move_numbers[active_idx] > max_moves
-        if bool(too_long.any().item()):
-            long_global = active_idx[too_long]
-            for gi in long_global.detach().cpu().tolist():
-                results[gi] = SelfPlayResult([], None, "MAX_MOVES", len(games[gi].samples), False)
-            active[long_global] = False
-            if not bool(active.any().item()):
-                break
-            active_idx = torch.nonzero(active, as_tuple=False).flatten()
-            active_states = states.select(active_idx)
+        # Repetition detection stays entirely on CUDA.
+        keys = active_states.state_hash()
+        history[active_idx, round_no - 1] = keys
+        previous = history[active_idx, :round_no]
+        repeated = (previous == keys[:, None]).sum(dim=1) >= 3
+        rep_local = torch.nonzero(repeated, as_tuple=False).flatten()
+        if rep_local.numel() > 0:
+            rep_global = active_idx[rep_local]
+            result_tensor[rep_global] = 0
+            termination_code[rep_global] = CODE_THREEFOLD
+            completed_tensor[rep_global] = True
+            active[rep_global] = False
+
+        active_idx = torch.nonzero(active, as_tuple=False).flatten()
+        if active_idx.numel() == 0:
+            continue
+        active_states = states.select(active_idx)
+
+        # Save the position BEFORE the selected move.  This is still entirely
+        # GPU-resident; no numpy/CPU conversion occurs here.
+        sample_pos = (move_numbers[active_idx] - 1).long()
+        model_input = active_states.to_model_input().to(torch.uint8)
+        sample_states[active_idx, sample_pos] = model_input
+        sample_players[active_idx, sample_pos] = (~active_states.turn).to(torch.int8).mul(2).sub(1)
 
         search.search(
             active_states,
@@ -155,31 +174,13 @@ def _play_games_gpu(
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_epsilon=dirichlet_epsilon,
         )
-
         policies = search.root_visit_policy()
-
-        # Exploration schedule for self-play action selection.
-        # Moves 1-60: strong exploration
-        # Moves 61-120: reduced exploration
-        # Moves 121+: low exploration while still keeping some randomness
-        if round_no <= temperature_moves:
-            current_temperature = temperature
-        else:
-            current_temperature = 0.10
-
+        current_temperature = temperature if round_no <= temperature_moves else 0.10
         actions = search.select_actions(current_temperature)
         next_states = search.advance(actions)
+        sample_policies[active_idx, sample_pos] = policies
 
-        # Store state/policy before the move. This matches the original
-        # AlphaZero-style training target convention.
-        state_batch = active_states.to_model_input().detach().cpu().numpy()
-        policy_batch = policies.detach().cpu().numpy()
-        players = (~active_states.turn).long().detach().cpu().tolist()
-        global_indices = active_idx.detach().cpu().tolist()
-        for local, gi in enumerate(global_indices):
-            games[gi].add_position(state_batch[local], policy_batch[local], 1 if players[local] else -1)
-
-        # Advance actual game states on GPU.
+        # Advance actual game states on CUDA.
         states.pieces[active_idx] = next_states.pieces
         states.turn[active_idx] = next_states.turn
         states.castling[active_idx] = next_states.castling
@@ -188,34 +189,110 @@ def _play_games_gpu(
         states.fullmove_number[active_idx] = next_states.fullmove_number
         move_numbers[active_idx] += 1
 
-        # Determine which games have ended after the move.
-        terminal, _ = next_states.terminal_info()
-        terminal |= next_states.insufficient_material()
-        term_local = torch.nonzero(terminal, as_tuple=False).flatten()
-        for local in term_local.detach().cpu().tolist():
-            gi = global_indices[local]
-            result, termination, completed = _terminal_result(next_states, local)
-            results[gi] = SelfPlayResult(
-                training_data=games[gi].get_training_data(result) if completed else [],
-                result=result if completed else None,
-                termination=termination,
-                moves_played=len(games[gi].samples),
-                completed=completed,
+        # Terminal detection is batched on CUDA.  Only the small terminal index
+        # list is copied to CPU for constructing Python result objects.
+        terminal, terminal_value = next_states.terminal_info()
+        insufficient_all = next_states.insufficient_material()
+        fifty_all = next_states.halfmove_clock >= 100
+        # terminal_info already computed legal moves. Its value is -1 only for
+        # checkmate, so do not regenerate the expensive legal mask here.
+        checkmate_all = terminal & (terminal_value < 0)
+        stalemate_all = terminal & ~checkmate_all & ~fifty_all & ~insufficient_all
+        terminal_all = terminal | insufficient_all
+        term_local = torch.nonzero(terminal_all, as_tuple=False).flatten()
+        if term_local.numel() > 0:
+            checkmate = checkmate_all[term_local]
+            fifty = fifty_all[term_local]
+            insufficient = insufficient_all[term_local]
+            stalemate = stalemate_all[term_local]
+            term_code = torch.where(
+                checkmate,
+                torch.full_like(term_local, CODE_CHECKMATE, dtype=torch.int64),
+                torch.where(
+                    fifty,
+                    torch.full_like(term_local, CODE_FIFTY, dtype=torch.int64),
+                    torch.where(
+                        insufficient,
+                        torch.full_like(term_local, CODE_INSUFFICIENT, dtype=torch.int64),
+                        torch.where(
+                            stalemate,
+                            torch.full_like(term_local, CODE_STALEMATE, dtype=torch.int64),
+                            torch.full_like(term_local, CODE_UNKNOWN, dtype=torch.int64),
+                        ),
+                    ),
+                ),
             )
-            active[gi] = False
+            term_turn = next_states.turn[term_local]
+            winner = torch.where(term_turn, torch.ones_like(term_local), -torch.ones_like(term_local))
+            term_result = torch.where(checkmate, winner, torch.zeros_like(term_local))
+            global_idx = active_idx[term_local]
+            result_tensor[global_idx] = term_result.to(torch.int8)
+            termination_code[global_idx] = term_code.to(torch.int8)
+            completed_tensor[global_idx] = True
+            active[global_idx] = False
 
-        # Threefold is checked on the next loop using the new actual positions.
+    # Any game still active reached the move budget and is deliberately not
+    # converted into training data.
+    max_idx = torch.nonzero(active, as_tuple=False).flatten()
+    if max_idx.numel() > 0:
+        termination_code[max_idx] = CODE_MAX_MOVES
+        completed_tensor[max_idx] = False
+        active[max_idx] = False
 
-        if round_no % 10 == 0:
-            print(f"GPU self-play round {round_no} | active games: {int(active.sum().item())}/{num_games}")
+    # One CPU transfer per completed game, instead of one transfer per move.
+    result_cpu = result_tensor.detach().cpu().tolist()
+    code_cpu = termination_code.detach().cpu().tolist()
+    completed_cpu = completed_tensor.detach().cpu().tolist()
+    move_cpu = move_numbers.detach().cpu().tolist()
 
-    print("\n" + "=" * 60)
+    code_names = {
+        CODE_CHECKMATE: "CHECKMATE",
+        CODE_STALEMATE: "STALEMATE",
+        CODE_FIFTY: "FIFTY_MOVE",
+        CODE_INSUFFICIENT: "INSUFFICIENT_MATERIAL",
+        CODE_THREEFOLD: "THREEFOLD_REPETITION",
+        CODE_MAX_MOVES: "MAX_MOVES",
+        CODE_UNKNOWN: "UNKNOWN",
+    }
+
+    results: list[Optional[SelfPlayResult]] = [None] * num_games
+    for gi in range(num_games):
+        completed = bool(completed_cpu[gi])
+        code = int(code_cpu[gi])
+        result = int(result_cpu[gi]) if completed else None
+        # A game that terminates before making a move has zero samples.  The
+        # number of stored positions is move_numbers-1, except for repetition
+        # which is checked before the move and therefore has the same count.
+        sample_count = max(0, int(move_cpu[gi]) - 1)
+        if completed and sample_count > 0:
+            s = sample_states[gi, :sample_count].detach().cpu().numpy().astype(np.float32, copy=False)
+            p = sample_policies[gi, :sample_count].detach().cpu().numpy()
+            pl = sample_players[gi, :sample_count].detach().cpu().numpy()
+            data = []
+            for j in range(sample_count):
+                player = int(pl[j])
+                if result == 0:
+                    value = 0.0
+                elif result == 1:
+                    value = float(player)
+                else:
+                    value = float(-player)
+                data.append((s[j], p[j], value))
+        else:
+            data = []
+
+        results[gi] = SelfPlayResult(
+            training_data=data,
+            result=result,
+            termination=code_names.get(code, "UNKNOWN"),
+            moves_played=sample_count,
+            completed=completed,
+        )
+
+    print("\\n" + "=" * 60)
     print("GPU SELF-PLAY COMPLETE")
     print("=" * 60)
     for i, result in enumerate(results):
-        if result is None:
-            result = SelfPlayResult([], None, "UNKNOWN", len(games[i].samples), False)
-            results[i] = result
         print(
             f"Game {i + 1}: moves={result.moves_played} | "
             f"result={result.result} | termination={result.termination} | "

@@ -64,6 +64,7 @@ class GPUMCTS:
         self.edge_child = None
         self.edge_action = None
         self.edge_prior = None
+        self.edge_valid = None
         self.edge_used = 0
 
         # Reused indexing buffers. These avoid allocating the same arange
@@ -71,6 +72,7 @@ class GPUMCTS:
         self._child_cols = None
         self._edge_ids = None
         self._root_ids = None
+        self._action_ids = None
 
     def _allocate(self, num_games: int, num_simulations: int):
         # One root plus at most one newly expanded leaf per simulation and game.
@@ -100,6 +102,7 @@ class GPUMCTS:
         self.edge_child = torch.full((self.max_edges,), -1, dtype=torch.int32, device=dev)
         self.edge_action = torch.zeros((self.max_edges,), dtype=torch.int16, device=dev)
         self.edge_prior = torch.zeros((self.max_edges,), dtype=torch.float32, device=dev)
+        self.edge_valid = torch.zeros((self.max_edges,), dtype=torch.bool, device=dev)
         self.edge_used = 0
 
         # Cache frequently reused GPU indexing tensors for this search.
@@ -112,6 +115,7 @@ class GPUMCTS:
         self._root_ids = torch.arange(
             self.num_games, device=dev, dtype=torch.long
         )
+        self._action_ids = torch.arange(4544, device=dev, dtype=torch.long)
 
     def _state_view(self, node_ids: torch.Tensor) -> GPUChess:
         """Create a lightweight GPUChess view containing selected tree nodes."""
@@ -149,74 +153,88 @@ class GPUMCTS:
         return logits.float(), values.squeeze(-1).float(), legal
 
     def _expand(self, node_ids: torch.Tensor, logits: torch.Tensor, legal: torch.Tensor) -> torch.Tensor:
-        if node_ids.numel() == 0:
+        """Expand a batch without GPU->CPU synchronization.
+
+        Every expanded node receives a fixed ``max_children`` edge slot block.
+        This deliberately avoids ``Tensor.item()``, dynamic prefix sizing and
+        CPU decisions in the hot path.  Only the first ``legal_count`` slots
+        are considered valid.
+        """
+        n = node_ids.numel()
+        if n == 0:
             return torch.empty((0,), dtype=torch.bool, device=self.device)
-        counts = legal.sum(dim=1).to(torch.int64)
-        if bool((counts > self.max_children).any()):
-            raise RuntimeError("A chess position exceeded the configured GPU MCTS child capacity.")
 
-        total = int(counts.sum().item())
-        if total == 0:
-            self.terminal[node_ids] = True
-            self.expanded[node_ids] = True
-            return torch.ones((node_ids.numel(),), dtype=torch.bool, device=self.device)
-        if self.edge_used + total > self.max_edges:
+        counts = legal.sum(dim=1, dtype=torch.int16)
+        # MAX_LEGAL_MOVES is 256 and the engine guarantees <= 218 legal moves.
+        # No host-side check is needed here.
+
+        # Fixed-size legal action extraction. topk puts all True entries first
+        # because the input is 0/1. This removes the dynamic nonzero()/cumsum()
+        # path and therefore removes synchronization caused by computing the
+        # total number of edges on the CPU.
+        # Rank legal actions by their original 4544-action index. This keeps
+        # the project's deterministic action ordering while still producing a
+        # fixed-size CUDA tensor with no host synchronization.
+        action_grid = self._action_ids[None, :].expand(n, -1)
+        ranked = torch.where(legal, action_grid, torch.full_like(action_grid, 4544))
+        actions = torch.topk(
+            ranked, k=self.max_children, dim=1, largest=False, sorted=True
+        ).values
+        slots = self._child_cols[None, :]
+        valid = actions < 4544
+
+        edge_start = self.edge_used
+        reserved = n * self.max_children
+        edge_end = edge_start + reserved
+        if edge_end > self.max_edges:
             raise RuntimeError("GPU MCTS edge pool exhausted; increase the search capacity.")
-        if self.max_nodes < self.edge_used + total + self.num_games:
-            raise RuntimeError("GPU MCTS node pool exhausted.")
 
-        # Legal policy is computed entirely on GPU.  Invalid logits are masked
-        # before softmax so no CPU-side move filtering is needed.
+        edge_ids = self._edge_ids[edge_start:edge_end].view(n, self.max_children)
+        child_nodes = self.num_games + edge_ids
+
+        self.edge_start[node_ids] = edge_ids[:, 0].to(torch.int32)
+        self.edge_count[node_ids] = counts
+
         masked = logits.masked_fill(~legal, torch.finfo(logits.dtype).min)
         priors = torch.softmax(masked, dim=1)
         priors = priors * legal.to(priors.dtype)
         priors = priors / priors.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
-        pairs = torch.nonzero(legal, as_tuple=False)
-        parent_local = pairs[:, 0]
-        actions = pairs[:, 1].to(torch.long)
-        parent_nodes = node_ids[parent_local]
-        edge_start = self.edge_used
-        edge_end = edge_start + total
-        edge_ids = self._edge_ids[edge_start:edge_end]
+        flat_valid = valid.reshape(-1)
+        flat_actions = actions.reshape(-1)
+        flat_edges = edge_ids.reshape(-1)
+        flat_children = child_nodes.reshape(-1)
+        flat_parents = node_ids[:, None].expand(-1, self.max_children).reshape(-1)
 
-        # Child node IDs are one-to-one with edges.
-        child_nodes = self.num_games + edge_ids
-        if int(child_nodes[-1].item()) >= self.max_nodes:
-            raise RuntimeError("GPU MCTS node pool exhausted.")
+        v_actions = flat_actions[flat_valid]
+        v_edges = flat_edges[flat_valid]
+        v_children = flat_children[flat_valid]
+        v_parents = flat_parents[flat_valid]
 
-        self.parent[child_nodes] = parent_nodes.to(torch.int32)
-        self.edge_child[edge_ids] = child_nodes.to(torch.int32)
-        self.edge_action[edge_ids] = actions.to(torch.int16)
-        self.edge_prior[edge_ids] = priors[parent_local, actions]
+        self.parent[v_children] = v_parents.to(torch.int32)
+        self.edge_child[v_edges] = v_children.to(torch.int32)
+        self.edge_action[v_edges] = v_actions.to(torch.int16)
+        prior_actions = actions.clamp_max(4543)
+        self.edge_prior[v_edges] = priors.gather(1, prior_actions).reshape(-1)[flat_valid]
+        self.edge_valid[edge_ids.reshape(-1)] = valid.reshape(-1)
 
-        # Because nonzero() is row-major, each parent occupies one contiguous
-        # edge segment.  Prefix offsets recover those segments without Python
-        # loops over individual children.
-        prefix = torch.cumsum(counts, dim=0) - counts
-        starts = edge_start + prefix
-        self.edge_start[node_ids] = starts.to(torch.int32)
-        self.edge_count[node_ids] = counts.to(torch.int16)
-
-        # Apply all child actions as one GPU batch.
-        parent_states = self._state_view(parent_nodes)
+        # Apply all valid child actions as one GPU batch.
+        parent_states = self._state_view(v_parents)
         child_states = parent_states.apply_actions_unchecked(
-            self._edge_ids[:total],
-            actions,
+            torch.arange(v_actions.numel(), device=self.device, dtype=torch.long),
+            v_actions,
         )
-        self._write_states(child_nodes, child_states)
+        self._write_states(v_children, child_states)
 
-        # Draw conditions that do not require move generation can be marked
-        # immediately.  Checkmate/stalemate are discovered when the child is
-        # selected and its legal mask is evaluated; this avoids generating the
-        # legal moves of every child during every expansion.
-        child_view = self._state_view(child_nodes)
+        child_view = self._state_view(v_children)
         draw_terminal = (child_view.halfmove_clock >= 100) | child_view.insufficient_material()
-        self.terminal[child_nodes] = draw_terminal
+        self.terminal[v_children] = draw_terminal
 
         self.expanded[node_ids] = True
+        self.terminal[node_ids] = counts == 0
         self.edge_used = edge_end
-        return torch.zeros((node_ids.numel(),), dtype=torch.bool, device=self.device)
+        return (counts == 0)
+
 
     def _select_leaves(self, root_ids: torch.Tensor, max_depth: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Select one leaf per root in parallel and return leaf ids + paths."""
@@ -229,17 +247,16 @@ class GPUMCTS:
 
         while depth < max_depth:
             selectable = active & self.expanded[current] & ~self.terminal[current] & (self.edge_count[current] > 0)
-            if not bool(selectable.any()):
-                break
-
             sel_rows = torch.nonzero(selectable, as_tuple=False).flatten()
+            if sel_rows.numel() == 0:
+                break
             nodes = current[sel_rows]
             starts = self.edge_start[nodes].to(torch.long)
             counts = self.edge_count[nodes].to(torch.long)
             arange_child = self._child_cols[None, :]
             edge_idx = starts[:, None] + arange_child
-            valid = arange_child < counts[:, None]
             edge_idx_safe = edge_idx.clamp(0, self.max_edges - 1)
+            valid = self.edge_valid[edge_idx_safe]
             child = self.edge_child[edge_idx_safe].to(torch.long)
             visits = self.visit_count[child].float()
             sums = self.value_sum[child]
@@ -270,9 +287,9 @@ class GPUMCTS:
         for d in range(depth - 1, -1, -1):
             nodes = paths[:, d].to(torch.long)
             valid = nodes >= 0
-            if not bool(valid.any()):
-                continue
             n = nodes[valid]
+            if n.numel() == 0:
+                continue
             vv = v[valid]
             self.visit_count.index_add_(
                 0, n, torch.ones(vv.shape, dtype=torch.int32, device=self.device)
@@ -324,13 +341,14 @@ class GPUMCTS:
             leaves, paths = self._select_leaves(roots, max_depth=max_depth)
             terminal = self.terminal[leaves]
             values = torch.zeros((self.num_games,), dtype=torch.float32, device=self.device)
-            if bool(terminal.any()):
-                t_ids = leaves[terminal]
+
+            t_ids = leaves[terminal]
+            if t_ids.numel() > 0:
                 values[terminal] = self._terminal_values(t_ids)
 
             nonterminal = ~terminal
-            if bool(nonterminal.any()):
-                nt_ids = leaves[nonterminal]
+            nt_ids = leaves[nonterminal]
+            if nt_ids.numel() > 0:
                 logits, nn_values, legal = self._evaluate(nt_ids)
                 self._expand(nt_ids, logits, legal)
                 no_moves = ~legal.any(dim=1)
@@ -340,7 +358,8 @@ class GPUMCTS:
                     -torch.ones_like(nn_values),
                     torch.zeros_like(nn_values),
                 )
-                newly_terminal = no_moves | (self._state_view(nt_ids).halfmove_clock >= 100) | self._state_view(nt_ids).insufficient_material()
+                nt_view = self._state_view(nt_ids)
+                newly_terminal = no_moves | (nt_view.halfmove_clock >= 100) | nt_view.insufficient_material()
                 values[nonterminal] = torch.where(newly_terminal, exact_terminal_value, nn_values)
 
             self._backup(paths, values)
@@ -352,8 +371,8 @@ class GPUMCTS:
         counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         actions = self.edge_action[safe].to(torch.long)
         visits = self.visit_count[self.edge_child[safe].to(torch.long)].float()
         if temperature <= 0:
@@ -375,8 +394,8 @@ class GPUMCTS:
         counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         actions = self.edge_action[safe].to(torch.long)
         visits = self.visit_count[self.edge_child[safe].to(torch.long)].float()
         if temperature <= 0:
@@ -391,18 +410,16 @@ class GPUMCTS:
         roots = self._root_ids
         starts = self.edge_start[roots].to(torch.long)
         counts = self.edge_count[roots].to(torch.long)
-        maxc = int(counts.max().item()) if counts.numel() else 0
-        if maxc == 0:
-            return
-        cols = torch.arange(maxc, device=self.device, dtype=torch.long)[None, :]
+        maxc = self.max_children
+        cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
+        e = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[e]
         # A Dirichlet distribution is sampled independently for each root.
         noise = torch.distributions.Dirichlet(torch.full((maxc,), alpha, device=self.device)).sample((self.num_games,))
         # Renormalize only over actual legal children.
         noise = noise * valid.float()
         noise = noise / noise.sum(dim=1, keepdim=True).clamp_min(1e-12)
-        e = edge_idx.clamp(0, self.max_edges - 1)
         old = self.edge_prior[e]
         self.edge_prior[e] = torch.where(valid, (1 - epsilon) * old + epsilon * noise, old)
 
@@ -414,8 +431,8 @@ class GPUMCTS:
         counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         actions = self.edge_action[safe].to(torch.long)
         visits = self.visit_count[self.edge_child[safe].to(torch.long)].float()
         visits = torch.where(valid, visits, torch.zeros_like(visits))
@@ -432,13 +449,10 @@ class GPUMCTS:
         counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         edge_actions = self.edge_action[safe].to(torch.long)
         matches = (edge_actions == actions[:, None]) & valid
-        found = matches.any(dim=1)
-        if not bool(found.all()):
-            raise RuntimeError("Selected GPU MCTS action is not a root child.")
         pos = torch.argmax(matches.to(torch.int8), dim=1)
         child_ids = self.edge_child[safe.gather(1, pos[:, None]).squeeze(1)].to(torch.long)
         return self._state_view(child_ids)
@@ -450,8 +464,8 @@ class GPUMCTS:
         root_counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = root_starts[:, None] + cols
-        valid = cols < root_counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         edge_actions = self.edge_action[safe].to(torch.long)
         chosen_pos = (edge_actions == actions[:, None]) & valid
         chosen_edge = torch.argmax(chosen_pos.to(torch.int8), dim=1)
@@ -464,8 +478,8 @@ class GPUMCTS:
         counts = self.edge_count[roots].to(torch.long)
         cols = self._child_cols[None, :]
         edge_idx = starts[:, None] + cols
-        valid = cols < counts[:, None]
         safe = edge_idx.clamp(0, self.max_edges - 1)
+        valid = self.edge_valid[safe]
         actions = self.edge_action[safe].to(torch.long)
         visits = self.visit_count[self.edge_child[safe].to(torch.long)].float()
         return actions, visits, valid

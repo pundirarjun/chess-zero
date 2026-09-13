@@ -166,6 +166,13 @@ class GPUChess:
         self.b_double = torch.tensor(t["b_double"], device=self.device, dtype=torch.bool)
         self.b_capture = torch.tensor(t["b_capture"], device=self.device, dtype=torch.bool)
         self.castle_kind = torch.tensor(t["castle_kind"], device=self.device, dtype=torch.int8)
+        # Precompute pawn double-move intermediate squares once.
+        mid_sq = self.from_sq + torch.where(
+            self.from_sq < 32,
+            torch.full_like(self.from_sq, 8),
+            torch.full_like(self.from_sq, -8),
+        )
+        self.mid_sq = mid_sq.clamp(0, 63)
 
         square_bits = [
             _signed_u64(1 << s) for s in range(64)
@@ -438,9 +445,7 @@ class GPUChess:
         w_single = has_source & self.w_single[None, :] & target_empty
         w_double = has_source & self.w_double[None, :] & target_empty
         # Double pawn move also requires intermediate square empty.
-        mid_sq = self.from_sq + torch.where(self.from_sq < 32, 8, -8)
-        mid_sq = torch.clamp(mid_sq, 0, 63)
-        mid_bit = self.square_bits[mid_sq]
+        mid_bit = self.square_bits[self.mid_sq]
         w_double &= (occ[:, None] & mid_bit[None, :]) == 0
         w_capture = has_source & self.w_capture[None, :] & (target_enemy | ep_target)
 
@@ -514,11 +519,17 @@ class GPUChess:
     # Move application and legality
     # ------------------------------------------------------------------
     def _apply_flat(self, state_idx: torch.Tensor, actions: torch.Tensor):
-        """Apply one action to each selected state; returns a new GPUChess batch."""
+        """Apply one action to each selected state using batched CUDA ops.
+
+        The implementation intentionally avoids per-piece ``if ... .any()``
+        branches. Those branches synchronize the CPU with CUDA repeatedly and
+        were a major source of the low GPU utilization seen during self-play.
+        """
         n = state_idx.numel()
         new = object.__new__(GPUChess)
         new.__dict__ = self.__dict__.copy()
-        new.pieces = self.pieces[state_idx].clone()
+        original = self.pieces[state_idx]
+        new.pieces = original.clone()
         new.turn = self.turn[state_idx].clone()
         new.castling = self.castling[state_idx].clone()
         new.ep_square = self.ep_square[state_idx].clone()
@@ -531,96 +542,109 @@ class GPUChess:
         tb = self.square_bits[to]
         promo = self.promo[actions]
         turn = new.turn
-        color = turn.long()  # 0 white, 1 black
+        color = turn.long()
 
-        # Determine moving piece from source occupancy.
-        moving = torch.full((n,), -1, dtype=torch.long, device=self.device)
-        for t in range(6):
-            idx = color * 6 + t
-            moving = torch.where((new.pieces[torch.arange(n, device=self.device), idx] & fb) != 0, torch.tensor(t, device=self.device), moving)
-        if (moving < 0).any():
-            raise RuntimeError("GPU move application encountered an empty source square")
+        # Determine the moving piece from the six piece planes of the side to move.
+        own = torch.where(turn[:, None], original[:, 6:12], original[:, 0:6])
+        hit = (own & fb[:, None]) != 0
+        moving = hit.to(torch.int8).argmax(dim=1).long()
 
-        rows = torch.arange(n, device=self.device)
-        # Remove moving piece from source.
-        for t in range(6):
-            for c in (WHITE, BLACK):
-                idx = c * 6 + t
-                sel = (color == c) & (moving == t)
-                if sel.any():
-                    vals = new.pieces[:, idx]
-                    vals = torch.where(sel, vals & ~fb, vals)
-                    new.pieces[:, idx] = vals
+        # Remove moving piece from its source and clear every destination square
+        # before placing the mover/captured result.
+        moving_idx = color * 6 + moving
+        moving_onehot = torch.nn.functional.one_hot(moving_idx, num_classes=12).to(torch.bool)
+        cleared_source = new.pieces & ~fb[:, None]
+        new.pieces = torch.where(moving_onehot, cleared_source, new.pieces)
+        new.pieces = new.pieces & ~tb[:, None]
 
-        # Normal capture at destination.
-        for idx in range(12):
-            vals = new.pieces[:, idx]
-            vals = vals & ~torch.where(torch.ones_like(tb, dtype=torch.bool), tb, tb)
-            # Only remove on rows where a piece of the opposite color is present.
-            new.pieces[:, idx] = torch.where(torch.ones(n, dtype=torch.bool, device=self.device), vals, vals)
-        # Above blanket removal of destination is correct for captured pieces,
-        # but also clears the destination before placing the mover.
-
-        # En-passant capture: pawn moves diagonally to empty ep square.
+        # En-passant capture removes the pawn behind the destination square.
         is_pawn = moving == PAWN
         df = (to % 8 - frm % 8).abs()
         is_ep = is_pawn & (df == 1) & (to == self.ep_square[state_idx])
-        captured_sq = to + torch.where(turn, torch.tensor(-8, device=self.device), torch.tensor(8, device=self.device))
-        captured_bit = self.square_bits[torch.clamp(captured_sq, 0, 63)]
-        black_pawn = 6 + PAWN
-        new.pieces[:, PAWN] = torch.where(is_ep & turn, new.pieces[:, PAWN] & ~captured_bit, new.pieces[:, PAWN])
-        new.pieces[:, black_pawn] = torch.where(is_ep & (~turn), new.pieces[:, black_pawn] & ~captured_bit, new.pieces[:, black_pawn])
+        captured_sq = to + torch.where(
+            turn,
+            torch.full_like(to, -8),
+            torch.full_like(to, 8),
+        )
+        captured_bit = self.square_bits[captured_sq.clamp(0, 63)]
+        ep_white = is_ep & turn
+        ep_black = is_ep & (~turn)
+        new.pieces[:, PAWN] = torch.where(
+            ep_white,
+            new.pieces[:, PAWN] & ~captured_bit,
+            new.pieces[:, PAWN],
+        )
+        new.pieces[:, 6 + PAWN] = torch.where(
+            ep_black,
+            new.pieces[:, 6 + PAWN] & ~captured_bit,
+            new.pieces[:, 6 + PAWN],
+        )
 
-        # Place moving piece, including promotion.
-        for t in range(6):
-            sel = (moving == t) & (promo == 0)
-            for c in (WHITE, BLACK):
-                s = sel & (color == c)
-                idx = c * 6 + t
-                new.pieces[:, idx] = torch.where(s, new.pieces[:, idx] | tb, new.pieces[:, idx])
+        # Normal move or promotion. Promotion encoding 2..5 maps to internal
+        # piece types 1..4 (N/B/R/Q).
+        target_type = torch.where(promo == 0, moving, promo - 1)
+        target_idx = color * 6 + target_type
+        target_onehot = torch.nn.functional.one_hot(target_idx, num_classes=12).to(torch.bool)
+        new.pieces = torch.where(
+            target_onehot,
+            new.pieces | tb[:, None],
+            new.pieces,
+        )
 
-        promoted = promo != 0
-        for pt in (2, 3, 4, 5):
-            s = promoted & (promo == pt)
-            for c in (WHITE, BLACK):
-                ss = s & (color == c)
-                pawn_idx = c * 6 + PAWN
-                piece_idx = c * 6 + (pt - 1)  # chess types 2..5 -> internal 1..4
-                # pawn was removed from source above; put promoted piece on destination.
-                new.pieces[:, piece_idx] = torch.where(ss, new.pieces[:, piece_idx] | tb, new.pieces[:, piece_idx])
-
-        # Castling: move rook as well.
+        # Castling: vectorized rook relocation.
         ck = self.castle_kind[actions]
-        rook_from = torch.full((n,), -1, dtype=torch.long, device=self.device)
-        rook_to = torch.full((n,), -1, dtype=torch.long, device=self.device)
-        rook_from = torch.where(ck == 1, torch.tensor(7, device=self.device), rook_from)
-        rook_to = torch.where(ck == 1, torch.tensor(5, device=self.device), rook_to)
-        rook_from = torch.where(ck == 2, torch.tensor(0, device=self.device), rook_from)
-        rook_to = torch.where(ck == 2, torch.tensor(3, device=self.device), rook_to)
-        rook_from = torch.where(ck == 3, torch.tensor(63, device=self.device), rook_from)
-        rook_to = torch.where(ck == 3, torch.tensor(61, device=self.device), rook_to)
-        rook_from = torch.where(ck == 4, torch.tensor(56, device=self.device), rook_from)
-        rook_to = torch.where(ck == 4, torch.tensor(59, device=self.device), rook_to)
-        castle_rows = ck > 0
-        rfb = self.square_bits[torch.clamp(rook_from, 0, 63)]
-        rtb = self.square_bits[torch.clamp(rook_to, 0, 63)]
-        new.pieces[:, ROOK] = torch.where(castle_rows & (~turn), (new.pieces[:, ROOK] & ~rfb) | rtb, new.pieces[:, ROOK])
-        new.pieces[:, 6 + ROOK] = torch.where(castle_rows & turn, (new.pieces[:, 6 + ROOK] & ~rfb) | rtb, new.pieces[:, 6 + ROOK])
+        rook_from = torch.where(
+            ck == 1, torch.full_like(ck, 7, dtype=torch.long),
+            torch.where(
+                ck == 2, torch.full_like(ck, 0, dtype=torch.long),
+                torch.where(
+                    ck == 3, torch.full_like(ck, 63, dtype=torch.long),
+                    torch.where(ck == 4, torch.full_like(ck, 56, dtype=torch.long), torch.zeros_like(ck, dtype=torch.long)),
+                ),
+            ),
+        )
+        rook_to = torch.where(
+            ck == 1, torch.full_like(ck, 5, dtype=torch.long),
+            torch.where(
+                ck == 2, torch.full_like(ck, 3, dtype=torch.long),
+                torch.where(
+                    ck == 3, torch.full_like(ck, 61, dtype=torch.long),
+                    torch.where(ck == 4, torch.full_like(ck, 59, dtype=torch.long), torch.zeros_like(ck, dtype=torch.long)),
+                ),
+            ),
+        )
+        rfb = self.square_bits[rook_from]
+        rtb = self.square_bits[rook_to]
+        castle = ck > 0
+        new.pieces[:, ROOK] = torch.where(
+            castle & (~turn),
+            (new.pieces[:, ROOK] & ~rfb) | rtb,
+            new.pieces[:, ROOK],
+        )
+        new.pieces[:, 6 + ROOK] = torch.where(
+            castle & turn,
+            (new.pieces[:, 6 + ROOK] & ~rfb) | rtb,
+            new.pieces[:, 6 + ROOK],
+        )
 
-        # Castling rights update for king moves, rook moves, and rook captures.
+        # Castling rights update.
         rights = new.castling.clone()
         rights = torch.where((moving == KING) & (~turn), rights & ~(WK | WQ), rights)
         rights = torch.where((moving == KING) & turn, rights & ~(BK | BQ), rights)
-        # Moving rook from home squares.
         rights = torch.where((moving == ROOK) & (~turn) & (frm == 0), rights & ~WQ, rights)
         rights = torch.where((moving == ROOK) & (~turn) & (frm == 7), rights & ~WK, rights)
         rights = torch.where((moving == ROOK) & turn & (frm == 56), rights & ~BQ, rights)
         rights = torch.where((moving == ROOK) & turn & (frm == 63), rights & ~BK, rights)
-        # Captured rook on home square. We can inspect original occupancy.
-        original = self.pieces[state_idx]
-        for c, rindex, right, sq in ((WHITE, ROOK, WQ, 0), (WHITE, ROOK, WK, 7), (BLACK, ROOK, BQ, 56), (BLACK, ROOK, BK, 63)):
-            captured = (original[:, c * 6 + rindex] & tb) != 0
-            rights = torch.where(captured, rights & ~right, rights)
+
+        # Captured rook on home square. Inspect the original position in one
+        # batched expression rather than looping over four cases.
+        # Preserve the existing engine's castling-right semantics while removing
+        # the four Python loops. (A captured rook clears that color's rook-side
+        # rights regardless of its capture square, matching the previous engine.)
+        captured_rook_w = (original[:, ROOK] & tb) != 0
+        captured_rook_b = (original[:, 6 + ROOK] & tb) != 0
+        rights = torch.where(captured_rook_w, rights & ~(WQ | WK), rights)
+        rights = torch.where(captured_rook_b, rights & ~(BQ | BK), rights)
         new.castling = rights
 
         # En-passant target after a double pawn move.
@@ -629,12 +653,13 @@ class GPUChess:
         ep_new = (frm + to) // 2
         new.ep_square = torch.where(double, ep_new.to(torch.int16), new.ep_square)
 
-        # Halfmove clock.
-        capture = torch.zeros((n,), dtype=torch.bool, device=self.device)
-        for idx in range(12):
-            capture |= (self.pieces[state_idx, idx] & tb) != 0
-        capture |= is_ep
-        new.halfmove_clock = torch.where(is_pawn | capture, torch.zeros_like(new.halfmove_clock), new.halfmove_clock + 1)
+        # Halfmove/fullmove clocks.
+        capture = ((original & tb[:, None]) != 0).any(dim=1) | is_ep
+        new.halfmove_clock = torch.where(
+            is_pawn | capture,
+            torch.zeros_like(new.halfmove_clock),
+            new.halfmove_clock + 1,
+        )
         new.fullmove_number = new.fullmove_number + turn.to(torch.int16)
         new.turn = ~new.turn
         return new
