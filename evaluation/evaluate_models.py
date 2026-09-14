@@ -35,7 +35,7 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 50
+NUM_GAMES = 100
 
 NUM_SIMULATIONS = 100
 
@@ -994,12 +994,12 @@ def play_games(
         # PROGRESS
         # ==================================================
 
-        print(
-            f"Evaluation round {round_no} | "
-            f"active games: "
-            f"{int(active.sum().item())}/{NUM_GAMES}",
-            flush=True,
-        )
+        # print(
+        #     f"Evaluation round {round_no} | "
+        #     f"active games: "
+        #     f"{int(active.sum().item())}/{NUM_GAMES}",
+        #     flush=True,
+        # )
 
     # ======================================================
     # BUILD FINAL RESULTS
