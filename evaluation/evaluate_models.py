@@ -35,7 +35,7 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 300
+NUM_GAMES = 1000
 
 NUM_SIMULATIONS = 100
 
