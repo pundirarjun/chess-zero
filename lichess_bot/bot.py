@@ -14,14 +14,15 @@ PROJECT_ROOT = os.path.dirname(
     )
 )
 
+BOT_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
-    sys.path.insert(
-        0,
-        os.path.dirname(os.path.abspath(__file__))
-    )
+if BOT_DIR not in sys.path:
+    sys.path.insert(0, BOT_DIR)
 
 
 # ============================================================
@@ -33,14 +34,19 @@ from lichess_client import LichessClient
 
 
 # ============================================================
-# CONFIGURATION
+# SETTINGS
 # ============================================================
+
+OPPONENT = "stockfish"
 
 NUM_SIMULATIONS = 100
 
+CLOCK_LIMIT = 600
+CLOCK_INCREMENT = 0
+
 
 # ============================================================
-# RL23 LICHESS BOT
+# BOT
 # ============================================================
 
 class LichessBot:
@@ -52,13 +58,13 @@ class LichessBot:
         print("=" * 60)
 
         # ----------------------------------------------------
-        # Lichess client
+        # Lichess
         # ----------------------------------------------------
 
         self.client = LichessClient()
 
         # ----------------------------------------------------
-        # RL23 engine
+        # RL23
         # ----------------------------------------------------
 
         self.engine = ChessEngine(
@@ -66,7 +72,7 @@ class LichessBot:
         )
 
         # ----------------------------------------------------
-        # Verify account
+        # Account
         # ----------------------------------------------------
 
         account = self.client.get_account()
@@ -75,51 +81,44 @@ class LichessBot:
         self.title = account.get("title")
 
         print()
-        print("Lichess username:", self.username)
-        print("Account title:", self.title)
+        print("Username:", self.username)
+        print("Title:", self.title)
 
         if self.title != "BOT":
             raise RuntimeError(
-                "The Lichess account is not a BOT account."
+                "Lichess account is not a BOT account."
             )
 
-        print()
         print("BOT account verified.")
-        print("=" * 60)
 
     # ========================================================
-    # RECONSTRUCT BOARD
+    # BOARD FROM MOVES
     # ========================================================
 
-    def create_board_from_moves(self, moves):
+    def board_from_moves(self, moves):
 
         board = chess.Board()
 
         if not moves:
             return board
 
-        for move_uci in moves.split():
+        for uci in moves.split():
 
             try:
-
-                move = chess.Move.from_uci(
-                    move_uci
-                )
+                move = chess.Move.from_uci(uci)
 
             except ValueError:
-
                 print(
-                    "Invalid UCI move received:",
-                    move_uci
+                    "Invalid UCI received:",
+                    uci
                 )
-
                 continue
 
             if move not in board.legal_moves:
 
                 print(
-                    "WARNING: Illegal move received:",
-                    move_uci
+                    "WARNING: illegal move:",
+                    uci
                 )
 
                 continue
@@ -129,29 +128,19 @@ class LichessBot:
         return board
 
     # ========================================================
-    # MAKE ENGINE MOVE
+    # MAKE MOVE
     # ========================================================
 
-    def make_engine_move(
-        self,
-        game_id,
-        board
-    ):
-
-        # ----------------------------------------------------
-        # Safety checks
-        # ----------------------------------------------------
+    def make_move(self, game_id, board):
 
         if board.is_game_over():
-
-            print("Game is already over.")
-
+            print("Game already finished.")
             return
 
         print()
-        print("-" * 60)
+        print("=" * 60)
         print("RL23 THINKING")
-        print("-" * 60)
+        print("=" * 60)
 
         print(board)
 
@@ -159,64 +148,38 @@ class LichessBot:
         print("FEN:")
         print(board.fen())
 
-        print()
-        print(
-            f"MCTS simulations: "
-            f"{NUM_SIMULATIONS}"
-        )
-
-        # ----------------------------------------------------
-        # Think
-        # ----------------------------------------------------
-
-        start_time = time.time()
+        start = time.time()
 
         move = self.engine.choose_move(board)
 
-        elapsed = time.time() - start_time
-
-        # ----------------------------------------------------
-        # Safety check
-        # ----------------------------------------------------
+        elapsed = time.time() - start
 
         if move is None:
-
-            print(
-                "Engine returned no move."
-            )
-
+            print("Engine returned no move.")
             return
 
         if move not in board.legal_moves:
-
             raise RuntimeError(
-                f"ENGINE PRODUCED ILLEGAL MOVE: {move}"
+                f"Illegal move from engine: {move}"
             )
 
-        move_uci = move.uci()
+        uci = move.uci()
 
         print()
-        print("=" * 60)
         print("RL23 MOVE")
-        print("=" * 60)
-
+        print("-" * 60)
         print("Move:", move)
-        print("UCI:", move_uci)
+        print("UCI:", uci)
         print(
-            f"Thinking time: "
-            f"{elapsed:.2f} seconds"
+            f"Thinking time: {elapsed:.2f} seconds"
         )
-
-        # ----------------------------------------------------
-        # Send to Lichess
-        # ----------------------------------------------------
 
         print()
         print("Sending move to Lichess...")
 
         self.client.make_move(
             game_id,
-            move_uci
+            uci
         )
 
         print("Move sent successfully.")
@@ -236,16 +199,17 @@ class LichessBot:
 
         my_color = None
 
-        # ----------------------------------------------------
-        # Stream game
-        # ----------------------------------------------------
-
         for event in self.client.stream_game(game_id):
 
             event_type = event.get("type")
 
+            print(
+                "Game event:",
+                event_type
+            )
+
             # =================================================
-            # FULL GAME INFORMATION
+            # FULL GAME
             # =================================================
 
             if event_type == "gameFull":
@@ -270,43 +234,31 @@ class LichessBot:
                     ""
                 )
 
-                # ------------------------------------------------
-                # Determine our color
-                # ------------------------------------------------
-
                 if (
                     white_name.lower()
                     == self.username.lower()
                 ):
-
                     my_color = chess.WHITE
 
                 elif (
                     black_name.lower()
                     == self.username.lower()
                 ):
-
                     my_color = chess.BLACK
 
                 else:
-
                     print(
                         "Could not determine bot color."
                     )
-
                     return
 
                 print()
                 print(
-                    "RL23 is playing:",
+                    "RL23 color:",
                     "WHITE"
                     if my_color == chess.WHITE
                     else "BLACK"
                 )
-
-                # ------------------------------------------------
-                # Current game state
-                # ------------------------------------------------
 
                 state = event.get(
                     "state",
@@ -318,23 +270,19 @@ class LichessBot:
                     ""
                 )
 
-                board = self.create_board_from_moves(
+                board = self.board_from_moves(
                     moves
                 )
 
-                # ------------------------------------------------
-                # Check whose turn it is
-                # ------------------------------------------------
-
                 if board.turn == my_color:
 
-                    self.make_engine_move(
+                    self.make_move(
                         game_id,
                         board
                     )
 
             # =================================================
-            # GAME STATE UPDATE
+            # GAME STATE
             # =================================================
 
             elif event_type == "gameState":
@@ -342,17 +290,12 @@ class LichessBot:
                 if my_color is None:
                     continue
 
-                moves = event.get(
-                    "moves",
-                    ""
-                )
-
                 status = event.get(
                     "status"
                 )
 
                 # ------------------------------------------------
-                # Check game status
+                # Game ended
                 # ------------------------------------------------
 
                 if status and status != "started":
@@ -367,51 +310,90 @@ class LichessBot:
                     return
 
                 # ------------------------------------------------
-                # Reconstruct board
+                # Current moves
                 # ------------------------------------------------
 
-                board = self.create_board_from_moves(
+                moves = event.get(
+                    "moves",
+                    ""
+                )
+
+                board = self.board_from_moves(
                     moves
                 )
 
                 # ------------------------------------------------
-                # Check turn
+                # Our turn
                 # ------------------------------------------------
 
                 if board.turn == my_color:
 
-                    self.make_engine_move(
+                    self.make_move(
                         game_id,
                         board
                     )
 
-        print()
         print("Game stream ended.")
 
     # ========================================================
-    # MAIN EVENT LOOP
+    # CREATE CHALLENGE
+    # ========================================================
+
+    def challenge_stockfish(self):
+
+        print()
+        print("=" * 60)
+        print("CHALLENGING STOCKFISH")
+        print("=" * 60)
+
+        result = self.client.challenge_user(
+            username=OPPONENT,
+            rated=False,
+            clock_limit=CLOCK_LIMIT,
+            clock_increment=CLOCK_INCREMENT,
+            color="random"
+        )
+
+        challenge_id = result.get("id")
+
+        print()
+        print("Challenge created.")
+        print("Challenge ID:", challenge_id)
+        print("Opponent:", OPPONENT)
+        print("Color:", result.get("finalColor"))
+        print("Status:", result.get("status"))
+
+        return challenge_id
+
+    # ========================================================
+    # EVENT LOOP
     # ========================================================
 
     def run(self):
 
         print()
         print("=" * 60)
-        print("RL23 LICHESS BOT ONLINE")
+        print("RL23 LICHESS BOT")
         print("=" * 60)
 
+        # ----------------------------------------------------
+        # Create challenge
+        # ----------------------------------------------------
+
+        challenge_id = self.challenge_stockfish()
+
         print()
-        print("Username:", self.username)
         print(
-            "MCTS simulations:",
-            NUM_SIMULATIONS
+            "Waiting for Stockfish to accept..."
         )
 
-        print()
-        print("Waiting for Lichess events...")
-        print()
+        print(
+            "Challenge:",
+            challenge_id
+        )
 
         # ----------------------------------------------------
-        # Event stream
+        # Listen for events
         # ----------------------------------------------------
 
         for event in self.client.stream_events():
@@ -420,73 +402,16 @@ class LichessBot:
                 "type"
             )
 
-            # =================================================
-            # CHALLENGE
-            # =================================================
-
-            if event_type == "challenge":
-
-                challenge = event.get(
-                    "challenge",
-                    {}
-                )
-
-                challenge_id = challenge.get(
-                    "id"
-                )
-
-                challenger = challenge.get(
-                    "challenger",
-                    {}
-                )
-
-                challenger_name = challenger.get(
-                    "name",
-                    "unknown"
-                )
-
-                print()
-                print("=" * 60)
-                print("NEW CHALLENGE")
-                print("=" * 60)
-
-                print(
-                    "From:",
-                    challenger_name
-                )
-
-                print(
-                    "Challenge ID:",
-                    challenge_id
-                )
-
-                # ------------------------------------------------
-                # Accept
-                # ------------------------------------------------
-
-                try:
-
-                    self.client.accept_challenge(
-                        challenge_id
-                    )
-
-                    print(
-                        "Challenge accepted."
-                    )
-
-                except Exception as e:
-
-                    print(
-                        "Could not accept challenge:"
-                    )
-
-                    print(e)
+            print(
+                "Lichess event:",
+                event_type
+            )
 
             # =================================================
             # GAME START
             # =================================================
 
-            elif event_type == "gameStart":
+            if event_type == "gameStart":
 
                 game = event.get(
                     "game",
@@ -502,7 +427,7 @@ class LichessBot:
 
                 print()
                 print(
-                    "Game started:",
+                    "Game received:",
                     game_id
                 )
 
@@ -519,31 +444,63 @@ class LichessBot:
                     print("GAME ERROR")
                     print("=" * 60)
 
-                    print(e)
+                    print(
+                        repr(e)
+                    )
+
+                # ------------------------------------------------
+                # After game ends, create another challenge?
+                # ------------------------------------------------
+
+                print()
+                print(
+                    "Game finished. "
+                    "Bot is stopping."
+                )
+
+                return
 
             # =================================================
-            # GAME FINISH
+            # CHALLENGE CANCELLED
             # =================================================
 
-            elif event_type == "gameFinish":
+            elif event_type == "challengeCanceled":
 
-                game = event.get(
-                    "game",
+                challenge = event.get(
+                    "challenge",
                     {}
                 )
 
-                game_id = game.get(
-                    "id"
+                if challenge.get("id") == challenge_id:
+
+                    print(
+                        "Challenge was cancelled."
+                    )
+
+                    return
+
+            # =================================================
+            # CHALLENGE DECLINED
+            # =================================================
+
+            elif event_type == "challengeDeclined":
+
+                challenge = event.get(
+                    "challenge",
+                    {}
                 )
 
-                print(
-                    "Game finished:",
-                    game_id
-                )
+                if challenge.get("id") == challenge_id:
+
+                    print(
+                        "Challenge was declined."
+                    )
+
+                    return
 
 
 # ============================================================
-# START BOT
+# MAIN
 # ============================================================
 
 if __name__ == "__main__":
