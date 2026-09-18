@@ -343,7 +343,7 @@ class LichessBot:
 
         print()
         print("=" * 60)
-        print("CHALLENGING STOCKFISH")
+        print("CHALLENGING Worstfish")
         print("=" * 60)
 
         result = self.client.challenge_user(
@@ -384,7 +384,7 @@ class LichessBot:
 
         print()
         print(
-            "Waiting for Stockfish to accept..."
+            "Waiting for Worstfish to accept..."
         )
 
         print(
