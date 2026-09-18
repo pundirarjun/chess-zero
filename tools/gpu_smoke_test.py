@@ -91,7 +91,7 @@ def main():
             torch.ones_like(policy_sums),
             atol=1e-5,
             rtol=0,
-        ).item(),
+        ),
         f"sums={policy_sums.tolist()}",
     )
 
