@@ -31,7 +31,7 @@ from training.train_step import build_gpu_replay, train_from_gpu_replay
 # ---------------------------------------------------------------------------
 # Iteration / paths
 # ---------------------------------------------------------------------------
-RL_ITERATION = 24
+RL_ITERATION = 18
 PREVIOUS_ITERATION = RL_ITERATION - 1
 KAGGLE_CHECKPOINT_ROOT = "/kaggle/working/chess-zero/checkpoints"
 LOCAL_CHECKPOINT_ROOT = "checkpoints"   
