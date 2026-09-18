@@ -92,12 +92,6 @@ def create_optimizer(model):
     return torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 
-def create_scaler():
-    if device.type != "cuda":
-        return None
-    return torch.amp.GradScaler("cuda")
-
-
 # ---------------------------------------------------------------------------
 # Checkpoint / replay loading
 # ---------------------------------------------------------------------------
@@ -113,12 +107,28 @@ def _resolve_path(path):
 def load_previous_checkpoint(model, optimizer, path):
     path = _resolve_path(path)
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+
+    # Restore both model weights and Adam state so each RL iteration continues
+    # from the previous optimizer state instead of restarting Adam from scratch.
     model.load_state_dict(checkpoint["model_state_dict"])
+
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+        print("Loaded previous optimizer state.")
+    else:
+        # Keep compatibility with older checkpoints that did not save it.
+        print("Warning: previous checkpoint has no optimizer state; using a fresh Adam optimizer.")
+
+    # The learning rate is intentionally controlled by this iteration's config,
+    # even when the previous checkpoint was trained with a different LR.
     for group in optimizer.param_groups:
         group["lr"] = LEARNING_RATE
+
     model.to(device)
     if device.type == "cuda":
         model.to(memory_format=torch.channels_last)
+
     model.eval()
     return checkpoint, path
 
