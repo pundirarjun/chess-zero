@@ -275,7 +275,12 @@ class GPUMCTS:
             next_nodes = child.gather(1, best[:, None]).squeeze(1)
             current[sel_rows] = next_nodes
             depth += 1
-            paths[:, depth] = paths[:, depth - 1]
+
+            # Record the node only for rows that actually traversed at this
+            # depth.  Do NOT copy the previous node into inactive rows: those
+            # rows have already reached their leaf and must remain padded with
+            # -1.  Otherwise batched backup can count the same leaf multiple
+            # times when different games reach leaves at different depths.
             paths[sel_rows, depth] = next_nodes.to(torch.int32)
 
             # Rows that reached an unexpanded/terminal node stop. Others keep
@@ -285,23 +290,27 @@ class GPUMCTS:
         return current, paths[:, :depth + 1]
 
     def _backup(self, paths: torch.Tensor, values: torch.Tensor):
-        # Back up each root's path from leaf to root.  Each row is independent;
-        # duplicate-node collisions are possible only within a single tree and
-        # are handled by the sequential depth updates.
+        # Back up each root's path from leaf to root.  Paths may have different
+        # lengths, so the value sign must be based on the distance from each
+        # row's actual leaf rather than on the global padded depth.
         depth = paths.shape[1]
-        v = values.clone()
-        for d in range(depth - 1, -1, -1):
-            nodes = paths[:, d].to(torch.long)
-            valid = nodes >= 0
-            n = nodes[valid]
-            if n.numel() == 0:
-                continue
-            vv = v[valid]
+        valid = paths >= 0
+        lengths = valid.sum(dim=1)
+        d = torch.arange(depth, device=self.device)[None, :]
+        distance_from_leaf = lengths[:, None] - 1 - d
+        use = valid
+        nodes = paths[use].to(torch.long)
+        signs = torch.where(
+            (distance_from_leaf[use] % 2) == 0,
+            torch.ones_like(distance_from_leaf[use], dtype=values.dtype),
+            -torch.ones_like(distance_from_leaf[use], dtype=values.dtype),
+        )
+        vv = values[:, None].expand(-1, depth)[use] * signs
+        if nodes.numel():
             self.visit_count.index_add_(
-                0, n, torch.ones(vv.shape, dtype=torch.int32, device=self.device)
+                0, nodes, torch.ones(nodes.shape, dtype=torch.int32, device=self.device)
             )
-            self.value_sum.index_add_(0, n, vv)
-            v = -v
+            self.value_sum.index_add_(0, nodes, vv)
 
     def _terminal_values(self, node_ids: torch.Tensor) -> torch.Tensor:
         states = self._state_view(node_ids)
@@ -335,19 +344,31 @@ class GPUMCTS:
         self.value_sum.index_add_(0, nodes, losses)
 
     def _backup_batched(self, paths: torch.Tensor, values: torch.Tensor):
-        """GPU backup for [batch, games, depth] paths."""
+        """GPU backup for [batch, games, depth] paths with variable lengths."""
         b, g, depth = paths.shape
-        v = values.reshape(-1).clone()
         flat_paths = paths.reshape(b * g, depth)
-        for d in range(depth - 1, -1, -1):
-            nodes = flat_paths[:, d].to(torch.long)
-            valid = nodes >= 0
-            n = nodes[valid]
-            vv = v[valid]
-            if n.numel():
-                self.visit_count.index_add_(0, n, torch.ones_like(vv, dtype=torch.int32))
-                self.value_sum.index_add_(0, n, vv)
-            v = -v
+        flat_values = values.reshape(-1)
+
+        valid = flat_paths >= 0
+        lengths = valid.sum(dim=1)
+        d = torch.arange(depth, device=self.device)[None, :]
+        distance_from_leaf = lengths[:, None] - 1 - d
+
+        use = valid
+        nodes = flat_paths[use].to(torch.long)
+        base_values = flat_values[:, None].expand(-1, depth)[use]
+        signs = torch.where(
+            (distance_from_leaf[use] % 2) == 0,
+            torch.ones_like(base_values),
+            -torch.ones_like(base_values),
+        )
+        vv = base_values * signs
+
+        if nodes.numel():
+            self.visit_count.index_add_(
+                0, nodes, torch.ones(nodes.shape, dtype=torch.int32, device=self.device)
+            )
+            self.value_sum.index_add_(0, nodes, vv)
 
     def search(self,
         root_states: GPUChess,
