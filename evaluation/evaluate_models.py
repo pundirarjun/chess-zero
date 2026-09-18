@@ -63,7 +63,7 @@ DEVICE = torch.device(
 # ==========================================================
 
 MODEL_A_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_17.pt"
+    "/kaggle/working/chess-zero/checkpoints/rl_iteration_17.pt"
 )
 
 
