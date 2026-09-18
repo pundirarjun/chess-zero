@@ -1,33 +1,21 @@
 import os
 
-
-# ============================================================
-# LICHESS CONFIGURATION
-# ============================================================
-
-# Your Lichess API token should be stored as an environment
-# variable. DO NOT put the token directly into this file.
-#
-# Linux / Kaggle:
-#
-# export LICHESS_TOKEN="your_token_here"
-#
-# Kaggle:
-# Add LICHESS_TOKEN as a secret.
-#
-LICHESS_TOKEN = os.getenv("LICHESS_TOKEN")
+from kaggle_secrets import UserSecretsClient
 
 
 # ============================================================
-# BOT SETTINGS
+# LICHESS TOKEN
 # ============================================================
 
-# RL23 checkpoint
-MODEL_PATH = "checkpoints/rl_iteration_23.pt"
+user_secrets = UserSecretsClient()
 
-
-# MCTS simulations per move
-NUM_SIMULATIONS = 100
+try:
+    LICHESS_TOKEN = user_secrets.get_secret("LICHESS_TOKEN")
+except Exception as e:
+    raise RuntimeError(
+        "Could not access the Kaggle secret 'LICHESS_TOKEN'.\n"
+        "Make sure the secret exists and is enabled for this notebook."
+    ) from e
 
 
 # ============================================================
@@ -38,12 +26,25 @@ LICHESS_API = "https://lichess.org"
 
 
 # ============================================================
+# BOT SETTINGS
+# ============================================================
+
+MODEL_PATH = os.path.join(
+    "checkpoints",
+    "rl_iteration_23.pt"
+)
+
+NUM_SIMULATIONS = 100
+
+
+# ============================================================
 # SAFETY CHECK
 # ============================================================
 
 if not LICHESS_TOKEN:
     raise RuntimeError(
-        "LICHESS_TOKEN environment variable is not set.\n"
-        "Please configure your Lichess API token before "
-        "starting the bot."
+        "LICHESS_TOKEN is empty."
     )
+
+
+print("Lichess configuration loaded.")
