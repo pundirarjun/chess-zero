@@ -44,7 +44,7 @@ OUTPUT_REPLAY_BUFFER = os.path.join(LOCAL_CHECKPOINT_ROOT, f"replay_buffer_rl{RL
 # ---------------------------------------------------------------------------
 # Self-play.  Increase games first to keep the GPU busy; then increase sims.
 # ---------------------------------------------------------------------------
-NUM_SELF_PLAY_GAMES = 128
+NUM_SELF_PLAY_GAMES = 256
 NUM_SIMULATIONS = 100
 MAX_MOVES = 400
 MCTS_BATCH_SIZE = 64  # GPU search batch width / active-game batch.
@@ -57,7 +57,7 @@ DIRICHLET_EPSILON = 0.25
 # ---------------------------------------------------------------------------
 # Replay / training
 # ---------------------------------------------------------------------------
-REPLAY_BUFFER_CAPACITY = 100000
+REPLAY_BUFFER_CAPACITY = 200000
 TRAINING_BATCH_SIZE = 256
 TRAINING_STEPS = 150
 LEARNING_RATE = 1e-4
