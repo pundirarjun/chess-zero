@@ -37,7 +37,7 @@ from lichess_client import LichessClient
 # SETTINGS
 # ============================================================
 
-OPPONENT = "maia3-79m_2000"
+OPPONENT = "AetherBot"
 
 NUM_SIMULATIONS = 100
 
