@@ -10,6 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import os
+import random
+import shutil
+import tempfile
+import multiprocessing as mp
+
 import numpy as np
 import torch
 
@@ -310,6 +316,208 @@ def _play_games_gpu(
     print("Training samples:", sum(len(r.training_data) for r in results if r is not None))
     return results
 
+
+
+def _multi_gpu_self_play_worker(
+    rank: int,
+    device_id: int,
+    num_games: int,
+    checkpoint_path: str,
+    output_path: str,
+    num_simulations: int,
+    max_moves: int,
+    temperature: float,
+    temperature_moves: int,
+    dirichlet_alpha: float,
+    dirichlet_epsilon: float,
+    batch_size: int,
+    seed: int,
+):
+    """Run one independent self-play shard on one CUDA device.
+
+    Each worker owns its model, GPU chess state and MCTS tree. Results are
+    written to a temporary file instead of being sent through multiprocessing
+    IPC, because completed self-play data contains large 4544-action policies.
+    """
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    torch.cuda.set_device(device_id)
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    from model.chess_net import ChessNet
+    from environment.action_encoder import ActionEncoder
+
+    encoder = ActionEncoder()
+    model = ChessNet(action_space_size=encoder.size()).to(
+        torch.device(f"cuda:{device_id}")
+    )
+    model.to(memory_format=torch.channels_last)
+
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    print(
+        f"[Self-play worker {rank}] GPU {device_id}: "
+        f"{torch.cuda.get_device_name(device_id)} | games={num_games}",
+        flush=True,
+    )
+
+    results = play_games(
+        model=model,
+        num_games=num_games,
+        num_simulations=num_simulations,
+        max_moves=max_moves,
+        temperature=temperature,
+        temperature_moves=temperature_moves,
+        dirichlet_alpha=dirichlet_alpha,
+        dirichlet_epsilon=dirichlet_epsilon,
+        batch_size=batch_size,
+    )
+
+    torch.save(results, output_path)
+    print(
+        f"[Self-play worker {rank}] finished and saved {len(results)} games",
+        flush=True,
+    )
+
+
+def play_games_multi_gpu(
+    model,
+    checkpoint_path,
+    num_games=8,
+    num_simulations=100,
+    max_moves=200,
+    temperature=1.0,
+    temperature_moves=20,
+    dirichlet_alpha=0.3,
+    dirichlet_epsilon=0.25,
+    batch_size=128,
+    seed=42,
+):
+    """Split self-play across all visible CUDA GPUs.
+
+    The parent process does not run MCTS. One spawned process is created per
+    GPU, and each process runs an independent half/batch of the games. This
+    targets the expensive self-play stage only; neural-network training remains
+    unchanged in the parent process.
+    """
+    if num_games <= 0:
+        return []
+
+    if next(model.parameters()).device.type != "cuda":
+        return play_games(
+            model=model,
+            num_games=num_games,
+            num_simulations=num_simulations,
+            max_moves=max_moves,
+            temperature=temperature,
+            temperature_moves=temperature_moves,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+            batch_size=batch_size,
+        )
+
+    gpu_count = torch.cuda.device_count()
+    if gpu_count < 2:
+        return play_games(
+            model=model,
+            num_games=num_games,
+            num_simulations=num_simulations,
+            max_moves=max_moves,
+            temperature=temperature,
+            temperature_moves=temperature_moves,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+            batch_size=batch_size,
+        )
+
+    # Use every visible GPU. For your current 2-GPU setup this becomes
+    # 128 games on GPU 0 + 128 games on GPU 1 when num_games=256.
+    workers = min(gpu_count, num_games)
+    game_counts = [num_games // workers] * workers
+    for i in range(num_games % workers):
+        game_counts[i] += 1
+
+    checkpoint_path = os.path.abspath(os.fspath(checkpoint_path))
+    temp_dir = tempfile.mkdtemp(prefix="chess_selfplay_multi_gpu_")
+    ctx = mp.get_context("spawn")
+    processes = []
+    output_paths = []
+
+    try:
+        print("\nMULTI-GPU SELF-PLAY", flush=True)
+        print(f"Visible GPUs: {gpu_count}", flush=True)
+        print(f"Self-play workers: {workers}", flush=True)
+        print(f"Games per GPU: {game_counts}", flush=True)
+
+        # Free the parent's model VRAM while workers run. The model is moved
+        # back to CUDA by rl_training.py after self-play for the fast training
+        # phase.
+        model.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        for rank, (device_id, worker_games) in enumerate(enumerate(game_counts)):
+            output_path = os.path.join(temp_dir, f"worker_{rank}.pt")
+            output_paths.append(output_path)
+            process = ctx.Process(
+                target=_multi_gpu_self_play_worker,
+                args=(
+                    rank,
+                    device_id,
+                    worker_games,
+                    checkpoint_path,
+                    output_path,
+                    num_simulations,
+                    max_moves,
+                    temperature,
+                    temperature_moves,
+                    dirichlet_alpha,
+                    dirichlet_epsilon,
+                    batch_size,
+                    seed + rank,
+                ),
+            )
+            process.start()
+            processes.append(process)
+
+        for process in processes:
+            process.join()
+
+        failed = [
+            (rank, process.exitcode)
+            for rank, process in enumerate(processes)
+            if process.exitcode != 0
+        ]
+        if failed:
+            raise RuntimeError(f"Multi-GPU self-play worker failure: {failed}")
+
+        results = []
+        for output_path in output_paths:
+            worker_results = torch.load(
+                output_path, map_location="cpu", weights_only=False
+            )
+            results.extend(worker_results)
+
+        print(
+            f"MULTI-GPU SELF-PLAY COMPLETE: {len(results)} games",
+            flush=True,
+        )
+        return results
+    finally:
+        # Restore the parent's model to its original CUDA device so the
+        # existing training code can continue unchanged.
+        original_device = next(model.parameters()).device
+        if original_device.type == "cpu":
+            model.to("cuda:0")
+            model.to(memory_format=torch.channels_last)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def play_games(
     model,

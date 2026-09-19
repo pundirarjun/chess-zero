@@ -23,7 +23,7 @@ if PROJECT_ROOT not in sys.path:
 
 from model.chess_net import ChessNet
 from environment.action_encoder import ActionEncoder
-from training.self_play import play_games
+from training.self_play import play_games_multi_gpu
 from training.replay_buffer import ReplayBuffer
 from training.train_step import build_gpu_replay, train_from_gpu_replay
 
@@ -143,7 +143,7 @@ def load_previous_replay_buffer(path):
     return replay, path
 
 
-def generate_self_play_data(model, replay_buffer):
+def generate_self_play_data(model, replay_buffer, checkpoint_path):
     print("\n==============================")
     print("GPU SELF-PLAY")
     print("==============================")
@@ -151,8 +151,9 @@ def generate_self_play_data(model, replay_buffer):
     print(f"Simulations/game: {NUM_SIMULATIONS}")
     print(f"Max moves: {MAX_MOVES}")
 
-    results = play_games(
+    results = play_games_multi_gpu(
         model=model,
+        checkpoint_path=checkpoint_path,
         num_games=NUM_SELF_PLAY_GAMES,
         num_simulations=NUM_SIMULATIONS,
         max_moves=MAX_MOVES,
@@ -283,7 +284,7 @@ def main():
     print("Loaded replay buffer:", resolved_replay)
     print("Previous samples:", len(replay))
 
-    self_play_stats = generate_self_play_data(model, replay)
+    self_play_stats = generate_self_play_data(model, replay, resolved_checkpoint)
     save_replay_buffer(replay, OUTPUT_REPLAY_BUFFER)
     training_stats = train_model(model, optimizer, replay)
     save_rl_checkpoint(model, optimizer, self_play_stats, training_stats)
