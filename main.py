@@ -40,7 +40,7 @@ from pathlib import Path
 # ============================================================
 
 START_ITERATION = 31
-END_ITERATION = 45
+END_ITERATION = 40
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
