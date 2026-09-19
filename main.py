@@ -39,8 +39,8 @@ from pathlib import Path
 # CONFIGURATION
 # ============================================================
 
-START_ITERATION = 18
-END_ITERATION = 25
+START_ITERATION = 25
+END_ITERATION = 30
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
