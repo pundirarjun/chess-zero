@@ -37,7 +37,7 @@ from lichess_client import LichessClient
 # SETTINGS
 # ============================================================
 
-OPPONENT = "WorstFish"
+OPPONENT = "maia1"
 
 NUM_SIMULATIONS = 100
 
@@ -343,7 +343,7 @@ class LichessBot:
 
         print()
         print("=" * 60)
-        print("CHALLENGING Worstfish")
+        print(f"CHALLENGING {OPPONENT}")
         print("=" * 60)
 
         result = self.client.challenge_user(
@@ -384,7 +384,7 @@ class LichessBot:
 
         print()
         print(
-            "Waiting for Worstfish to accept..."
+            f"Waiting for {OPPONENT} to accept..."
         )
 
         print(
