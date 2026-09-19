@@ -37,7 +37,7 @@ from lichess_client import LichessClient
 # SETTINGS
 # ============================================================
 
-OPPONENT = "maia1"
+OPPONENT = "WorstFish"
 
 NUM_SIMULATIONS = 100
 
