@@ -31,7 +31,7 @@ from environment.action_encoder import ActionEncoder
 # ============================================================
 
 # Change this only if your checkpoint has a different name/location.
-MODEL_PATH = '/kaggle/input/datasets/arjunthakur9999/checkpoints/chess_checkpoints/rl_iteration_45.pt'
+MODEL_PATH = '/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_13.pt'
 
 ACTION_SPACE_SIZE = 4544
 
