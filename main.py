@@ -39,7 +39,7 @@ from pathlib import Path
 # CONFIGURATION
 # ============================================================
 
-START_ITERATION = 31
+START_ITERATION = 44
 END_ITERATION = 50
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -48,7 +48,7 @@ RL_TRAINING_SCRIPT = PROJECT_ROOT / "training" / "rl_training.py"
 
 WORKING_CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints"
 
-KAGGLE_INPUT_DIR = Path("/kaggle/input/datasets/arjunthakur9999/checkpoints")
+KAGGLE_INPUT_DIR = Path("/kaggle/working/chess-zero")
 
 # Files required to start RL18
 START_PREVIOUS_ITERATION = START_ITERATION - 1
