@@ -39,7 +39,7 @@ from lichess_client import LichessClient
 
 OPPONENT = "AetherBot"
 
-NUM_SIMULATIONS = 100
+NUM_SIMULATIONS = 250
 
 CLOCK_LIMIT = 600
 CLOCK_INCREMENT = 0
