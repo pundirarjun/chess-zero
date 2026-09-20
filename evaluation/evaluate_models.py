@@ -4,6 +4,9 @@ import os
 import sys
 import time
 import re
+import shutil
+import tempfile
+import multiprocessing as mp
 
 import torch
 
@@ -35,7 +38,7 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 10
+NUM_GAMES = 50
 
 NUM_SIMULATIONS = 100
 
@@ -63,7 +66,7 @@ DEVICE = torch.device(
 # ==========================================================
 
 MODEL_A_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/chess_checkpoints (1)/rl_iteration_30.pt"
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/chess_checkpoints (1)/rl_iteration_20.pt"
 )
 
 
@@ -78,15 +81,15 @@ MODEL_B_CHECKPOINT = (
 # CREATE MODEL
 # ==========================================================
 
-def create_model(path):
+def create_model(path, device):
 
     model = ChessNet(
         action_space_size=ACTION_SPACE_SIZE
-    ).to(DEVICE)
+    ).to(device)
 
     checkpoint = torch.load(
         path,
-        map_location=DEVICE,
+        map_location=device,
         weights_only=False
     )
 
@@ -96,7 +99,7 @@ def create_model(path):
 
     model.eval()
 
-    if DEVICE.type == "cuda":
+    if device.type == "cuda":
 
         model.to(
             memory_format=torch.channels_last
@@ -338,6 +341,7 @@ def copy_states(
 def search_batch(
     model,
     states: GPUChess,
+    device,
 ):
     """
     Run one batched GPU MCTS search.
@@ -350,7 +354,7 @@ def search_batch(
 
     search = GPUMCTS(
         model=model,
-        device=DEVICE,
+        device=device,
     )
 
     search.search(
@@ -376,6 +380,8 @@ def search_batch(
 def play_games(
     white_model,
     black_model,
+    device,
+    game_offset=0,
 ):
     """
     Play NUM_GAMES games simultaneously.
@@ -384,7 +390,7 @@ def play_games(
     neural network can be searched together.
     """
 
-    if DEVICE.type != "cuda":
+    if device.type != "cuda":
         raise RuntimeError(
             "GPU evaluation requires CUDA."
         )
@@ -394,7 +400,7 @@ def play_games(
     # ------------------------------------------------------
 
     states = GPUChess(
-        DEVICE,
+        device,
         NUM_GAMES
     )
 
@@ -405,7 +411,7 @@ def play_games(
     active = torch.ones(
         NUM_GAMES,
         dtype=torch.bool,
-        device=DEVICE
+        device=device
     )
 
     move_counts = [0] * NUM_GAMES
@@ -432,7 +438,7 @@ def play_games(
     # ------------------------------------------------------
 
     model_a_is_white = [
-        game % 2 == 0
+        (game_offset + game) % 2 == 0
         for game in range(NUM_GAMES)
     ]
 
@@ -680,7 +686,7 @@ def play_games(
             local_indices = torch.tensor(
                 white_games,
                 dtype=torch.long,
-                device=DEVICE
+                device=device
             )
 
             global_indices = (
@@ -731,7 +737,7 @@ def play_games(
                 subset = torch.tensor(
                     model_a_indices,
                     dtype=torch.long,
-                    device=DEVICE
+                    device=device
                 )
 
                 subset_global = (
@@ -749,7 +755,8 @@ def play_games(
                         for g in subset_global.detach().cpu().tolist()
                     )
                     else white_model,
-                    subset_states
+                    subset_states,
+                    device,
                 )
 
                 copy_states(
@@ -775,7 +782,7 @@ def play_games(
                 subset = torch.tensor(
                     model_b_indices,
                     dtype=torch.long,
-                    device=DEVICE
+                    device=device
                 )
 
                 subset_global = (
@@ -788,7 +795,8 @@ def play_games(
 
                 _, next_states = search_batch(
                     black_model,
-                    subset_states
+                    subset_states,
+                    device,
                 )
 
                 copy_states(
@@ -814,7 +822,7 @@ def play_games(
             local_indices = torch.tensor(
                 black_games,
                 dtype=torch.long,
-                device=DEVICE
+                device=device
             )
 
             global_indices = (
@@ -857,7 +865,7 @@ def play_games(
                 subset = torch.tensor(
                     model_a_indices,
                     dtype=torch.long,
-                    device=DEVICE
+                    device=device
                 )
 
                 subset_global = (
@@ -875,7 +883,8 @@ def play_games(
                         for g in subset_global.detach().cpu().tolist()
                     )
                     else black_model,
-                    subset_states
+                    subset_states,
+                    device,
                 )
 
                 copy_states(
@@ -901,7 +910,7 @@ def play_games(
                 subset = torch.tensor(
                     model_b_indices,
                     dtype=torch.long,
-                    device=DEVICE
+                    device=device
                 )
 
                 subset_global = (
@@ -916,7 +925,8 @@ def play_games(
                     white_model
                     if False
                     else black_model,
-                    subset_states
+                    subset_states,
+                    device,
                 )
 
                 copy_states(
@@ -1020,23 +1030,203 @@ def play_games(
     return final_results
 
 
+
+# ==========================================================
+# MULTI-GPU EVALUATION
+# ==========================================================
+
+def _evaluation_worker(
+    rank,
+    device_id,
+    num_games,
+    game_offset,
+    model_a_checkpoint,
+    model_b_checkpoint,
+    output_path,
+):
+    """Run one evaluation shard entirely on one GPU.
+
+    Each GPU owns both models and an independent set of games.
+    This is the same strategy used by multi-GPU self-play:
+    one process per GPU, with no cross-GPU state transfers.
+    """
+
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    torch.cuda.set_device(device_id)
+
+    device = torch.device(f"cuda:{device_id}")
+
+    print(
+        f"[Evaluation worker {rank}] "
+        f"GPU {device_id}: {torch.cuda.get_device_name(device_id)} | "
+        f"games={num_games}",
+        flush=True,
+    )
+
+    model_a, _ = create_model(
+        model_a_checkpoint,
+        device,
+    )
+
+    model_b, _ = create_model(
+        model_b_checkpoint,
+        device,
+    )
+
+    results = play_games(
+        white_model=model_a,
+        black_model=model_b,
+        device=device,
+        game_offset=game_offset,
+    )
+
+    torch.save(results, output_path)
+
+    print(
+        f"[Evaluation worker {rank}] "
+        f"finished {len(results)} games",
+        flush=True,
+    )
+
+
+def play_games_multi_gpu(
+    model_a_checkpoint,
+    model_b_checkpoint,
+):
+    """Run the evaluation across every visible CUDA GPU.
+
+    For two GPUs and NUM_GAMES=10:
+        GPU 0 -> 5 games
+        GPU 1 -> 5 games
+
+    Each worker loads both checkpoints onto its own GPU and runs
+    GPUChess + GPUMCTS locally. Therefore both GPUs are active
+    concurrently rather than one GPU handling all games.
+    """
+
+    gpu_count = torch.cuda.device_count()
+
+    if gpu_count < 2:
+        raise RuntimeError(
+            f"Expected at least 2 GPUs, but only {gpu_count} "
+            "CUDA device(s) are visible."
+        )
+
+    workers = min(gpu_count, NUM_GAMES)
+
+    game_counts = [NUM_GAMES // workers] * workers
+
+    for i in range(NUM_GAMES % workers):
+        game_counts[i] += 1
+
+    print()
+    print("=" * 60)
+    print("MULTI-GPU EVALUATION")
+    print("=" * 60)
+    print("Visible GPUs:", gpu_count)
+    print("Workers:", workers)
+    print("Games per GPU:", game_counts)
+
+    for device_id in range(gpu_count):
+        print(
+            f"GPU {device_id}: "
+            f"{torch.cuda.get_device_name(device_id)}"
+        )
+
+    temp_dir = tempfile.mkdtemp(
+        prefix="chess_eval_multi_gpu_"
+    )
+
+    ctx = mp.get_context("spawn")
+    processes = []
+    output_paths = []
+
+    try:
+        game_offset = 0
+
+        for rank, (device_id, worker_games) in enumerate(
+            enumerate(game_counts)
+        ):
+            output_path = os.path.join(
+                temp_dir,
+                f"worker_{rank}.pt",
+            )
+
+            output_paths.append(output_path)
+
+            process = ctx.Process(
+                target=_evaluation_worker,
+                args=(
+                    rank,
+                    device_id,
+                    worker_games,
+                    game_offset,
+                    model_a_checkpoint,
+                    model_b_checkpoint,
+                    output_path,
+                ),
+            )
+
+            process.start()
+            processes.append(process)
+
+            game_offset += worker_games
+
+        for process in processes:
+            process.join()
+
+        failed = [
+            (rank, process.exitcode)
+            for rank, process in enumerate(processes)
+            if process.exitcode != 0
+        ]
+
+        if failed:
+            raise RuntimeError(
+                f"Evaluation worker failure: {failed}"
+            )
+
+        results = []
+
+        for output_path in output_paths:
+            worker_results = torch.load(
+                output_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+
+            results.extend(worker_results)
+
+        if len(results) != NUM_GAMES:
+            raise RuntimeError(
+                f"Expected {NUM_GAMES} results, "
+                f"but received {len(results)}."
+            )
+
+        print(
+            f"MULTI-GPU EVALUATION COMPLETE: "
+            f"{len(results)} games"
+        )
+
+        return results
+
+    finally:
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True,
+        )
+
+
 # ==========================================================
 # EVALUATE MODELS
 # ==========================================================
 
 def evaluate_models(
-    model_a,
-    model_b,
+    results,
     name_a,
     name_b,
+    elapsed,
 ):
-
-    start_time = time.perf_counter()
-
-    results = play_games(
-        white_model=model_a,
-        black_model=model_b,
-    )
 
     a_wins = 0
     b_wins = 0
@@ -1239,61 +1429,53 @@ def evaluate_models(
 
 if __name__ == "__main__":
 
-    if DEVICE.type != "cuda":
-
+    if not torch.cuda.is_available():
         raise RuntimeError(
             "GPU evaluation requires CUDA."
         )
 
-    print(
-        "Evaluation device:",
-        DEVICE
-    )
+    gpu_count = torch.cuda.device_count()
+
+    if gpu_count < 2:
+        raise RuntimeError(
+            f"Expected 2 GPUs for this evaluation, "
+            f"but only {gpu_count} CUDA GPU(s) are visible."
+        )
 
     print(
-        "GPU:",
-        torch.cuda.get_device_name(0)
+        "Evaluation GPUs:",
+        gpu_count,
     )
+
+    for device_id in range(gpu_count):
+        print(
+            f"GPU {device_id}:",
+            torch.cuda.get_device_name(device_id),
+        )
 
     print(
         "CUDA:",
-        torch.version.cuda
+        torch.version.cuda,
     )
 
     print(
         "Games:",
-        NUM_GAMES
+        NUM_GAMES,
     )
 
     print(
         "Simulations/game:",
-        NUM_SIMULATIONS
+        NUM_SIMULATIONS,
     )
 
     print(
         "Max moves:",
-        MAX_MOVES
+        MAX_MOVES,
     )
 
     print(
         "Temperature:",
-        EVALUATION_TEMPERATURE
-    )
-
-    # ------------------------------------------------------
-    # LOAD MODELS
-    # ------------------------------------------------------
-
-    model_a, model_a_checkpoint = (
-        create_model(
-            MODEL_A_CHECKPOINT
-        )
-    )
-
-    model_b, model_b_checkpoint = (
-        create_model(
-            MODEL_B_CHECKPOINT
-        )
+        EVALUATION_TEMPERATURE,
     )
 
     # ------------------------------------------------------
@@ -1312,26 +1494,46 @@ if __name__ == "__main__":
         filename = os.path.basename(path)
         stem = os.path.splitext(filename)[0]
 
-        match = re.search(r"rl_iteration[_-]?(\d+)", stem, re.IGNORECASE)
+        match = re.search(
+            r"rl_iteration[_-]?(\d+)",
+            stem,
+            re.IGNORECASE,
+        )
+
         if match:
             return f"RL iteration {match.group(1)}"
 
-        match = re.search(r"pretrained[_-]?phase[_-]?(\d+)", stem, re.IGNORECASE)
+        match = re.search(
+            r"pretrained[_-]?phase[_-]?(\d+)",
+            stem,
+            re.IGNORECASE,
+        )
+
         if match:
             return f"Pretrained phase {match.group(1)}"
 
-        return stem.replace("_", " ").replace("-", " ").title()
+        return (
+            stem
+            .replace("_", " ")
+            .replace("-", " ")
+            .title()
+        )
 
-    name_a = checkpoint_name(MODEL_A_CHECKPOINT)
-    name_b = checkpoint_name(MODEL_B_CHECKPOINT)
+    name_a = checkpoint_name(
+        MODEL_A_CHECKPOINT
+    )
+
+    name_b = checkpoint_name(
+        MODEL_B_CHECKPOINT
+    )
 
     print()
-    print("Loaded model A checkpoint:")
+    print("Model A checkpoint:")
     print(MODEL_A_CHECKPOINT)
     print("Model A:", name_a)
 
     print()
-    print("Loaded model B checkpoint:")
+    print("Model B checkpoint:")
     print(MODEL_B_CHECKPOINT)
     print("Model B:", name_b)
 
@@ -1339,9 +1541,21 @@ if __name__ == "__main__":
     # EVALUATE
     # ------------------------------------------------------
 
+    start_time = time.perf_counter()
+
+    results = play_games_multi_gpu(
+        model_a_checkpoint=MODEL_A_CHECKPOINT,
+        model_b_checkpoint=MODEL_B_CHECKPOINT,
+    )
+
+    elapsed = (
+        time.perf_counter()
+        - start_time
+    )
+
     evaluate_models(
-        model_a,
-        model_b,
+        results,
         name_a,
-        name_b
+        name_b,
+        elapsed,
     )
