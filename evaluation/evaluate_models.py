@@ -382,6 +382,7 @@ def play_games(
     black_model,
     device,
     game_offset=0,
+    num_games=None,
 ):
     """
     Play NUM_GAMES games simultaneously.
@@ -396,12 +397,19 @@ def play_games(
         )
 
     # ------------------------------------------------------
+    # Resolve number of games for this worker
+    # ------------------------------------------------------
+
+    if num_games is None:
+        num_games = num_games
+
+    # ------------------------------------------------------
     # Master state
     # ------------------------------------------------------
 
     states = GPUChess(
         device,
-        NUM_GAMES
+        num_games
     )
 
     # ------------------------------------------------------
@@ -414,16 +422,16 @@ def play_games(
         device=device
     )
 
-    move_counts = [0] * NUM_GAMES
+    move_counts = [0] * num_games
 
     repetition = [
         {}
-        for _ in range(NUM_GAMES)
+        for _ in range(num_games)
     ]
 
-    results = [None] * NUM_GAMES
+    results = [None] * num_games
 
-    termination = [None] * NUM_GAMES
+    termination = [None] * num_games
 
     # ------------------------------------------------------
     # Game color assignment
@@ -439,7 +447,7 @@ def play_games(
 
     model_a_is_white = [
         (game_offset + game) % 2 == 0
-        for game in range(NUM_GAMES)
+        for game in range(num_games)
     ]
 
     round_no = 0
@@ -1017,7 +1025,7 @@ def play_games(
 
     final_results = []
 
-    for game_index in range(NUM_GAMES):
+    for game_index in range(num_games):
 
         final_results.append(
             {
@@ -1078,6 +1086,7 @@ def _evaluation_worker(
         black_model=model_b,
         device=device,
         game_offset=game_offset,
+        num_games=num_games,
     )
 
     torch.save(results, output_path)
