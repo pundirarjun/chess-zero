@@ -38,7 +38,7 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 50
+NUM_GAMES = 300
 
 NUM_SIMULATIONS = 100
 
@@ -66,14 +66,14 @@ DEVICE = torch.device(
 # ==========================================================
 
 MODEL_A_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/chess_checkpoints (1)/rl_iteration_30.pt"
+    "/kaggle/input/datasets/arjunthakur9999/checkpoints/chess_checkpoints/rl_iteration_45.pt"
 )
 
 
 
 
 MODEL_B_CHECKPOINT = (
-    "/kaggle/input/datasets/arjunthakur9999/checkpoints/rl_iteration_11.pt"
+    "/kaggle/working/chess-zero/checkpoints/rl_iteration_46.pt"
 )
 
 
