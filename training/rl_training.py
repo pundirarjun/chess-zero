@@ -87,7 +87,7 @@ OUTPUT_REPLAY_BUFFER = os.path.join(
 # Self-play configuration
 # ---------------------------------------------------------------------------
 
-NUM_SELF_PLAY_GAMES = 256
+NUM_SELF_PLAY_GAMES = 256   
 
 NUM_SIMULATIONS = 100
 
@@ -108,13 +108,13 @@ DIRICHLET_EPSILON = 0.25
 # Replay / training configuration
 # ---------------------------------------------------------------------------
 
-REPLAY_BUFFER_CAPACITY = 200000
+REPLAY_BUFFER_CAPACITY = 150000
 
 TRAINING_BATCH_SIZE = 256
 
-TRAINING_STEPS = 150
+TRAINING_STEPS = 600
 
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 
 SEED = 42
 
