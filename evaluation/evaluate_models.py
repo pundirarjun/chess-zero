@@ -38,11 +38,11 @@ from mcts.gpu_mcts import GPUMCTS
 # CONFIGURATION
 # ==========================================================
 
-NUM_GAMES = 300
+NUM_GAMES = 2
 
-NUM_SIMULATIONS = 100
+NUM_SIMULATIONS = 10
 
-MAX_MOVES = 400
+MAX_MOVES = 20
 
 # 0.0 = deterministic evaluation.
 EVALUATION_TEMPERATURE = 0.25
